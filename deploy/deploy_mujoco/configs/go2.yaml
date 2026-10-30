@@ -1,0 +1,76 @@
+# Paths are resolved from /deploy so this folder can be copied independently.
+policy_path: "{DEPLOY_ROOT_DIR}/pre_train/go2/policy_dwaq.pt"
+deterministic_vae: true
+
+# xml_path: "{DEPLOY_ROOT_DIR}/deploy_mujoco/resources/go2/scene.xml"
+# xml_path: "{DEPLOY_ROOT_DIR}/deploy_mujoco/resources/go2/cross_slope.xml"
+xml_path: "{DEPLOY_ROOT_DIR}/deploy_mujoco/resources/go2/cross_stairs.xml"
+
+# Total simulation time
+simulation_duration: 60000000.0
+# Simulation time step
+simulation_dt: 0.005
+# Controller update frequency: simulation_dt * control_decimation = 0.02s (50Hz)
+control_decimation: 4
+
+kps: [25.0, 25.0, 25.0, 25.0, 25.0, 25.0, 25.0, 25.0, 25.0, 25.0, 25.0, 25.0] 
+kds: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5] 
+
+default_angles: [0.0,  0.8,  -1.5,  0.0, 0.8, -1.5, 
+                 0.0,  0.8,  -1.5,  0.0, 0.8, -1.5] 
+torque_limits: [23.7, 23.7, 35.55, 23.7, 23.7, 35.55,
+                23.7, 23.7, 35.55, 23.7, 23.7, 35.55]
+
+lin_vel_scale: 2.0
+ang_vel_scale: 0.25 
+dof_pos_scale: 1.0 
+dof_vel_scale: 0.05 
+action_scale: 0.25 
+cmd_scale: [2.0, 2.0, 0.25]
+num_actions: 12
+num_obs: 45
+num_history_obs: 5
+policy_input_dim: 270
+cmd_range:
+  - [-1.0, 1.0]
+  - [-1.0, 1.0]
+  - [-1.0, 1.0]
+max_cmd: [1.0, 1.0, 1.0]
+
+cmd_init: [0.0, 0.0, 0.0]
+cmd_smoothing: 0.15
+stair_pulse_cmd: false
+stair_pulse_threshold: 0.9
+stair_pulse_on_time: 0.35
+stair_pulse_off_time: 0.22
+
+mujoco_joint_names: [
+  "FL_hip_joint",
+  "FL_thigh_joint",
+  "FL_calf_joint",
+  "FR_hip_joint",
+  "FR_thigh_joint",
+  "FR_calf_joint",
+  "RL_hip_joint",
+  "RL_thigh_joint",
+  "RL_calf_joint",
+  "RR_hip_joint",
+  "RR_thigh_joint",
+  "RR_calf_joint"
+]
+
+# IsaacGym is same as Mujoco joint names
+model_joint_names: [
+  "FL_hip_joint",
+  "FL_thigh_joint",
+  "FL_calf_joint",
+  "FR_hip_joint",
+  "FR_thigh_joint",
+  "FR_calf_joint",
+  "RL_hip_joint",
+  "RL_thigh_joint",
+  "RL_calf_joint",
+  "RR_hip_joint",
+  "RR_thigh_joint",
+  "RR_calf_joint"
+]

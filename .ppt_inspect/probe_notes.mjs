@@ -1,0 +1,1 @@
+import {FileBlob,PresentationFile} from '@oai/artifact-tool';const p=await PresentationFile.importPptx(await FileBlob.load('/Users/wangtinghong/Desktop/工作/副本重点突击到全面开花(1).pptx'));for(const s of p.slides.items){console.log(s.index, s.speakerNotes.textFrame?.text?.toString?.(), s.speakerNotes.textFrame?.toString?.(), s.speakerNotes.textFrame?.text);}

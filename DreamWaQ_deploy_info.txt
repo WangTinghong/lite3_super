@@ -1,0 +1,972 @@
+# DreamWaQ 部署信息提取（按当前算法代码）
+
+说明：
+- 未把 logs/Mar19_11-08-31_/model_78000.pt 作为依据。
+- 本文只依据当前仓库中的算法、环境、配置、导出和部署代码。
+- 找不到的内容明确写“没找到”，不按通用 DreamWaQ 补全。
+
+# 关键结论
+
+- actor obs 维度：
+  - 环境 actor observation `num_observations = 45`。
+  - actor MLP 实际输入维度是 `num_actor_obs + num_latent_dims + num_explicit_dims = 45 + 16 + 3 = 64`。
+  - 文件：legged_gym/envs/GO2_Trot/GO2_Stairs_config.py:9-18，rsl_rl/rsl_rl/modules/actor_critic_dreamwaq.py:49-54。
+
+- actor 输入拼接内容：
+  - 训练 `act()`：`code = cat(code_vel, code_latent)`，再 `cat(code, observations)`。
+  - 推理 `act_inference()`：`cat(mean_vel, mean_latent, observations)`。
+  - 现有 TorchScript DWAQ export：输入 `obs_history` 总长 270，前 225 给 VAE，后 45 作为当前 obs，actor 输入是 `cat(code, current_obs)`。
+
+- obs_buf 拼接顺序：
+  1. `commands[:, :3] * commands_scale`，3 维
+  2. `base_ang_vel * obs_scales.ang_vel`，3 维
+  3. `projected_gravity`，3 维
+  4. `(dof_pos - default_dof_pos) * obs_scales.dof_pos`，12 维
+  5. `dof_vel * obs_scales.dof_vel`，12 维
+  6. `actions`，12 维
+  - 总计 45 维。
+  - 不包含 `base_lin_vel`、height scan、phase。
+  - 包含 commands、base_ang_vel、projected_gravity、dof_pos、dof_vel、actions。
+
+- privileged obs 维度：
+  - `single_num_privileged_obs = 261`
+  - `c_frame_stack = 3`
+  - `num_privileged_obs = 783`
+
+- privileged obs 单帧拼接顺序：
+  1. height scan：`root_states[:, 2] - 0.5 - measured_heights` clip 后乘 `height_measurements`
+  2. `base_lin_vel * obs_scales.lin_vel`
+  3. `friction_coeffs`
+  4. `restitution_coeffs`
+  5. `p_gains_multiplier`
+  6. `d_gains_multiplier`
+  7. `commands[:, :3] * commands_scale`
+  8. `base_ang_vel * obs_scales.ang_vel`
+  9. `projected_gravity`
+  10. `(dof_pos - default_dof_pos) * obs_scales.dof_pos`
+  11. `dof_vel * obs_scales.dof_vel`
+  12. `actions`
+
+- history 是否存在：
+  - 存在两个 history：
+    - `obs_hist_buf`：给 VAE/estimator，长度 225。
+    - `obs_history` deque：actor observation frame stack，当前配置 `frame_stack = 1`。
+
+- history 长度：
+  - VAE history：`num_obs_hist = 5`，`num_history_obs = 5 * 45 = 225`。
+  - actor obs frame stack：`frame_stack = 1`，所以 `obs_buf = 1 * 45 = 45`。
+  - critic history：`c_frame_stack = 3`，所以 `privileged_obs_buf = 3 * 261 = 783`。
+  - MuJoCo deploy YAML 中 `num_history_obs: 5` 表示历史帧数，policy 输入是 `(5 + 1) * 45 = 270`，其中前 225 是历史，最后 45 是当前 obs。
+
+- history 顺序：
+  - old -> new。
+  - 训练中 `obs_hist_buf = obs_hist_buf[:, 45:]` 后拼接旧的 `self.obs_buf`，注释写“不要包含当前帧数据”。
+  - `obs_history` deque append 后按 index 0 到 maxlen-1 stack，再 flatten，也是 old -> new。
+  - 部署中 `np.concatenate(list(obs_history), axis=0)`，deque 也是 old -> new。
+
+- estimator 输入：
+  - 训练：`obs_hist_buf`，shape `[num_envs, 225]`。
+  - 导出 TorchScript：`obs_history[:, :-45]`，shape `[batch, 225]`。
+
+- estimator 输出：
+  - `mean_vel / code_vel`：3 维。
+  - `mean_latent / code_latent`：16 维。
+  - `code = cat(code_vel, code_latent)`：19 维。
+  - `decode`：45 维。
+
+- actor 输出维度：
+  - 12 维 action。
+
+- action 到 target joint position 公式：
+  - 训练环境 PD 等效 target：`target_dof_pos = actions * action_scale + default_dof_pos`。
+  - MuJoCo deploy 显式：`target_dof_pos = action * action_scale + default_angles`。
+
+- PD torque 公式：
+  - 训练环境：
+    `torques = p_gains_multiplier * p_gains * (actions * action_scale + default_dof_pos - dof_pos) - d_gains_multiplier * d_gains * dof_vel`
+    然后 `torques *= torques_multiplier`，最后按 `torque_limits` clip。
+  - MuJoCo deploy：
+    `tau = (target_q - q) * kp + (target_dq - dq) * kd`，`target_dq=0`，然后 clip torque limits。
+
+- action clip：
+  - 训练环境 `step()` 里先 `torch.clip(actions, -clip_actions, clip_actions)`。
+  - 当前配置 `clip_actions = 100.`
+  - MuJoCo deploy 中没找到 action clip，只看到 torque clip。
+
+- action_scale：
+  - `0.25`
+
+- default_dof_pos 顺序：
+  - 训练中按 IsaacGym 加载出的 `self.dof_names` 顺序逐项读取 `cfg.init_state.default_joint_angles[name]`。
+  - 部署 MuJoCo config 明确 `model_joint_names` 顺序：
+    `FL_hip_joint, FL_thigh_joint, FL_calf_joint, FR_hip_joint, FR_thigh_joint, FR_calf_joint, RL_hip_joint, RL_thigh_joint, RL_calf_joint, RR_hip_joint, RR_thigh_joint, RR_calf_joint`
+  - 对应 default_angles：
+    `[0.0, 0.8, -1.5, 0.0, 0.8, -1.5, 0.0, 0.8, -1.5, 0.0, 0.8, -1.5]`
+
+- kp/kd 来源：
+  - 训练配置：`stiffness = {'joint': 25.}`，`damping = {'joint': 0.5}`。
+  - `_init_buffers()` 中如果 `dof_name` 包含 stiffness key `joint`，则给该 dof 赋值。
+  - MuJoCo deploy config：12 个 kp 全是 25.0，12 个 kd 全是 0.5。
+
+- control dt / decimation：
+  - sim dt：`0.005`
+  - decimation：`4`
+  - control dt：`0.005 * 4 = 0.02s`
+
+- command ranges：
+  - 配置初始范围：
+    - `lin_vel_x = [-1.0, 1.0]`
+    - `lin_vel_y = [-1.0, 1.0]`
+    - `ang_vel_yaw = [-1, 1]`
+    - `heading = [-3.14, 3.14]`
+  - `_resample_commands()` 中 `lin_vel_x` 实际还受 curriculum/current_iter 的 `max_vel` 影响，初始 `max_vel=1.0`，之后可到 1.2/1.4/1.5。
+  - `heading_command=True` 时采样 heading，再在 `_post_physics_step_callback()` 中把 yaw command 设为 heading error clip 到 [-1, 1]。
+
+- action delay / latency / motor strength randomization：
+  - 有 action latency：`add_cmd_action_latency = True`，`randomize_cmd_action_latency = True`，`range_cmd_action_latency = [0, 3]`。
+  - 有 PD gain randomization：`randomize_pd_gains = True`，stiffness/damping multiplier range 都是 `[0.9, 1.1]`。
+  - 有 torque multiplier randomization：`torque_multiplier_range = [0.9, 1.1]`，`_compute_torques()` 中 `torques *= self.torques_multiplier`。
+  - 配置里有 `randomize_motor_zero_offset=True`，但 GO2_Stairs.py 当前 `_compute_torques()` 没使用 `motor_zero_offsets`，也没找到 GO2_Stairs.py 内对 `motor_zero_offsets` 随机赋值。
+
+- .pt 保存格式：
+  - 训练保存 `model_*.pt` 的代码是 checkpoint 格式，包含：
+    - `model_state_dict`
+    - `optimizer_state_dict`
+    - `vae_optimizer_state_dict`
+    - `learning_rate`
+    - `iter`
+    - `infos`
+  - 这是依据 `DreamWaQRunner.save()` 代码，不依据 `model_78000.pt` 文件本身。
+
+- 是否已有 TorchScript 导出：
+  - 有：`export_policy_as_dwaq(actor_critic, path)`。
+  - 导出文件名：`policy_dwaq.pt`。
+  - 导出内容：`actor + vae`。
+  - TorchScript forward 输入：`obs_history`，shape `[batch, 270]`。
+  - TorchScript forward 输出：`actions_mean`，shape `[batch, 12]`。
+
+- 部署时应该导出 actor 还是 actor+estimator：
+  - 按当前 DreamWaQ 算法，应导出 `actor + VAE/estimator`。
+  - 单独 actor 需要外部先算出 19 维 `code_vel + code_latent`，否则 actor 输入维度 64 对不上。
+
+- 训练和推理的输入是否一致：
+  - 训练 `actor_critic.act(obs, obs_hist)`：`obs` 是 45，`obs_hist` 是 225，actor 最终吃 64。
+  - `act_inference(obs, obs_hist)`：同样是 45 + 225，actor 最终吃 64。
+  - TorchScript deploy wrapper：把 225 history + 45 current obs 拼成 270 单输入，内部再拆开，最终 actor 仍吃 64。
+  - `deploy/deploy_mujoco/deploy_go2.py` 与 TorchScript DWAQ wrapper 一致。
+  - `deploy/deploy_real/deploy_real_go2.py` 当前只喂 45 维，且 observation 顺序是 `ang_vel, gravity, cmd, ...`，与 GO2_Stairs.py 的 DreamWaQ 训练 obs 顺序不一致；这个脚本看起来不是当前 DreamWaQ 270 维导出模型的直接部署实现。
+
+# 需要给 ChatGPT 看的文件
+
+按优先级：
+
+1. `/home/pc/go2_gym/legged_gym/envs/GO2_Trot/GO2_Stairs.py`
+2. `/home/pc/go2_gym/legged_gym/envs/GO2_Trot/GO2_Stairs_config.py`
+3. `/home/pc/go2_gym/rsl_rl/rsl_rl/modules/actor_critic_dreamwaq.py`
+4. `/home/pc/go2_gym/rsl_rl/rsl_rl/modules/vae.py`
+5. `/home/pc/go2_gym/rsl_rl/rsl_rl/algorithms/ppo_dreamwaq.py`
+6. `/home/pc/go2_gym/rsl_rl/rsl_rl/runners/dreamwaq_runner.py`
+7. `/home/pc/go2_gym/legged_gym/utils/helpers.py`
+8. `/home/pc/go2_gym/deploy/deploy_mujoco/deploy_go2.py`
+9. `/home/pc/go2_gym/deploy/deploy_mujoco/configs/go2.yaml`
+10. `/home/pc/go2_gym/deploy/deploy_real/deploy_real_go2.py`（只作为反例/核对，不建议按它部署当前 DWAQ 270 维模型）
+11. `/home/pc/go2_gym/deploy/deploy_real/configs/go2.yaml`（只作为真实机器人旧/不同部署配置核对）
+
+# 配置参数
+
+文件：`legged_gym/envs/GO2_Trot/GO2_Stairs_config.py`
+
+```python
+class GO2_Stairs_Cfg_Yu( LeggedRobotCfg ):
+    class env:
+        frame_stack =1#action stack
+        c_frame_stack = 3 #critic 网络的堆叠帧数
+        num_envs = 4096
+        num_single_obs = 45 #这个是传感器可以获得到的信息
+        num_observations = int(frame_stack * num_single_obs) 
+        single_num_privileged_obs = 261  #不平衡的观测，包含了特权信息，正常传感器获得不到的信息
+        num_privileged_obs = int(c_frame_stack * single_num_privileged_obs) # 3帧特权观测
+        num_obs_hist=5 #  10帧正常的观测
+        num_latent_dims=16
+        num_explicit_dims=3
+
+        num_history_obs=num_obs_hist*num_single_obs
+        num_actions = 12
+        episode_length_s = 20 # episode length in seconds
+        env_spacing = 3.
+        send_timeouts=True
+```
+
+```python
+class commands:
+    curriculum = True
+    max_curriculum = 2.0#2.5
+    num_commands = 4
+    resampling_time = 10.
+    heading_command = True
+    class ranges:
+        lin_vel_x = [-1.0,1.0]
+        lin_vel_y = [-1.0,1.0]
+        ang_vel_yaw = [-1, 1]
+        heading = [-3.14, 3.14]
+```
+
+```python
+class init_state:
+    pos = [0.0, 0.0, 0.42]
+    rot = [0.0, 0.0, 0.0, 1.0]
+    lin_vel = [0.0, 0.0, 0.0]
+    ang_vel = [0.0, 0.0, 0.0]
+    default_joint_angles = {
+        'FL_hip_joint': 0.,
+        'RL_hip_joint': 0.,
+        'FR_hip_joint': -0. ,
+        'RR_hip_joint': -0.,
+
+        'FL_thigh_joint': 0.8,
+        'RL_thigh_joint': 0.8,
+        'FR_thigh_joint': 0.8,
+        'RR_thigh_joint': 0.8,
+
+        'FL_calf_joint': -1.5,
+        'RL_calf_joint': -1.5,
+        'FR_calf_joint': -1.5,
+        'RR_calf_joint': -1.5,
+    }
+```
+
+```python
+class control:
+    control_type = 'P'
+    stiffness = {'joint': 25.}
+    damping = {'joint': 0.5}
+    action_scale = 0.25
+    decimation = 4
+```
+
+```python
+class domain_rand:
+    randomize_pd_gains = True
+    stiffness_multiplier_range = [0.9, 1.1]
+    damping_multiplier_range = [0.9, 1.1]
+    torque_multiplier_range=[0.9,1.1]
+
+    randomize_motor_zero_offset = True
+    motor_zero_offset_range = [-0.035, 0.035]
+
+    add_cmd_action_latency = True
+    randomize_cmd_action_latency = True
+    range_cmd_action_latency = [0, 3]
+```
+
+```python
+class normalization:
+    class obs_scales:
+        lin_vel = 2.0
+        ang_vel = 0.25
+        dof_pos = 1.0
+        dof_vel = 0.05
+        height_measurements = 5.0
+    clip_observations = 100.
+    clip_actions = 100.
+```
+
+```python
+class sim:
+    dt =  0.005
+    substeps = 1
+    gravity = [0., 0. ,-9.81]
+    up_axis = 1
+```
+
+# 关键代码
+
+## 1. 网络结构
+
+文件：`rsl_rl/rsl_rl/modules/actor_critic_dreamwaq.py:32`
+
+```python
+class ActorCriticDreamWaQ(nn.Module):
+    def __init__(self, 
+                num_actor_obs, 
+                num_critic_obs, 
+                num_actions, 
+                cenet_in_dim, 
+                num_latent_dims,
+                num_explicit_dims,
+                activation="elu", 
+                actor_hidden_dims=[256, 256, 256],
+                critic_hidden_dims=[256, 256, 256],
+                    init_noise_std=1.0,
+                    **kwargs):
+        if kwargs:
+            print("ActorCriticDreamWaQ.__init__ got unexpected arguments, which will be ignored: " + str([key for key in kwargs.keys()]))
+        super(ActorCriticDreamWaQ, self).__init__()
+
+        activation = get_activation(activation)
+        actor_input_dim = num_actor_obs+num_latent_dims+num_explicit_dims
+        critic_input_dim = num_critic_obs
+        # Policy
+        actor_layers = []
+        actor_layers.append(nn.Linear(actor_input_dim, actor_hidden_dims[0]))
+        
+        actor_layers.append(activation)
+        for l in range(len(actor_hidden_dims)):
+            if l == len(actor_hidden_dims) - 1:
+                actor_layers.append(
+                    nn.Linear(actor_hidden_dims[l], num_actions))
+            else:
+                actor_layers.append(
+                    nn.Linear(actor_hidden_dims[l], actor_hidden_dims[l + 1]))
+                actor_layers.append(activation)
+        self.actor = nn.Sequential(*actor_layers)
+
+        # Value function
+        critic_layers = []
+        critic_layers.append(nn.Linear(critic_input_dim, critic_hidden_dims[0]))
+        critic_layers.append(activation)
+        for l in range(len(critic_hidden_dims)):
+            if l == len(critic_hidden_dims) - 1:
+                critic_layers.append(nn.Linear(critic_hidden_dims[l], 1))
+            else:
+                critic_layers.append(
+                    nn.Linear(critic_hidden_dims[l], critic_hidden_dims[l + 1]))
+                critic_layers.append(activation)
+        self.critic = nn.Sequential(*critic_layers)
+        self.vae=VAE(cenet_in_dim, 
+                     num_latent_dims,
+                     num_explicit_dims,
+                     num_actor_obs)
+        print(f"VAE MLP: {self.vae}")
+        print(f"Actor MLP: {self.actor}")
+        print(f"Critic MLP: {self.critic}")
+        self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
+        self.distribution = None
+        Normal.set_default_validate_args = False
+
+    def reset(self, dones=None):
+        pass
+
+    @property
+    def action_mean(self):
+        return self.distribution.mean
+
+    @property
+    def action_std(self):
+        return self.distribution.stddev
+
+    @property
+    def entropy(self):
+        return self.distribution.entropy().sum(dim=-1)
+
+    def update_distribution(self, observations):
+        mean = self.actor(observations)
+        self.distribution = Normal(mean, mean * 0.0 + self.std)
+
+    def act(self, observations, obs_history, **kwargs):
+        code,_,_,_= self.vae.cenet_forward(obs_history, deterministic=True)
+        code = code.detach()
+        observations = torch.cat((code,observations),dim=-1)
+        self.update_distribution(observations)
+        return self.distribution.sample()
+
+    def get_actions_log_prob(self, actions):
+        return self.distribution.log_prob(actions).sum(dim=-1)
+
+    def act_inference(self, observations,obs_history):
+        _,_,_,latent= self.vae.cenet_forward(obs_history, deterministic=True)
+        mean_vel,logvar_vel,mean_latent,logvar_latent=latent
+        observations = torch.cat((mean_vel,mean_latent,observations),dim=-1)
+        actions_mean = self.actor(observations)
+        return actions_mean
+
+    def evaluate(self, critic_observations, **kwargs):
+        value = self.critic(critic_observations)
+        return value
+```
+
+`ActorCriticDreamWaQ.forward()`：没找到。
+
+文件：`rsl_rl/rsl_rl/modules/vae.py:6`
+
+```python
+class VAE(nn.Module):
+    def __init__(self, 
+                cenet_in_dim,
+                num_latent_dim,
+                num_est_dims,
+                num_decode_dims=45,
+                activation="elu", 
+                **kwargs):
+        if kwargs:
+            print("ActorCritic_DWAQ.__init__ got unexpected arguments, which will be ignored: " + str([key for key in kwargs.keys()]))
+        super(VAE, self).__init__()
+        self.activation = get_activation(activation)
+
+        self.encoder = nn.Sequential(
+            nn.Linear(cenet_in_dim,128),
+            self.activation,
+            nn.Linear(128,64),
+            self.activation,
+        )
+        self.encode_mean_latent = nn.Linear(64,num_latent_dim)
+        self.encode_logvar_latent = nn.Sequential(
+            nn.Linear(64,num_latent_dim),
+            nn.Hardtanh(min_val=-5., max_val=5.)
+            )
+        self.encode_mean_vel = nn.Linear(64,num_est_dims)
+        self.encode_logvar_vel =nn.Sequential(
+            nn.Linear(64,num_est_dims),
+            nn.Hardtanh(min_val=-5., max_val=5.)
+            )
+
+        self.decoder = nn.Sequential(
+            nn.Linear(num_latent_dim+num_est_dims,128),
+            self.activation,
+            nn.Linear(128,128),
+            self.activation,
+            nn.Linear(128,num_decode_dims)
+        )
+
+    def reparameterise(self,mean,logvar):
+        var = torch.exp(logvar*0.5)
+        code_temp = torch.randn_like(var)
+        return mean + var*code_temp
+    
+    def cenet_forward(self,obs_history, deterministic: bool=False):
+        encoded = self.encoder(obs_history)
+        mean_latent = self.encode_mean_latent(encoded)
+        logvar_latent = self.encode_logvar_latent(encoded)
+        mean_vel = self.encode_mean_vel(encoded)
+        logvar_vel = self.encode_logvar_vel(encoded)
+        if deterministic:
+            code_latent = mean_latent
+            code_vel = mean_vel
+        else:
+            code_latent = self.reparameterise(mean_latent,logvar_latent)
+            code_vel = self.reparameterise(mean_vel,logvar_vel)
+        
+        code = torch.cat((code_vel,code_latent),dim=-1)
+        decode = self.decoder(code)
+        return (code),(code_vel,code_latent),(decode),(mean_vel,logvar_vel,mean_latent,logvar_latent)
+```
+
+## 2. observation 构造
+
+文件：`legged_gym/envs/GO2_Trot/GO2_Stairs.py:204`
+
+```python
+def compute_observations(self):
+    self.obs_hist_buf = self.obs_hist_buf[:,45:]
+    self.obs_hist_buf = torch.cat((self.obs_hist_buf,self.obs_buf),dim = -1) #不要包含当前帧数据
+
+    obs_buf = torch.cat((
+        self.commands[:, :3] * self.commands_scale,                     # 3
+        self.base_ang_vel * self.obs_scales.ang_vel,                   # 3
+        self.projected_gravity,                                         # 3
+        (self.dof_pos - self.default_dof_pos) *
+        self.obs_scales.dof_pos,  # num_dofs
+        self.dof_vel * self.obs_scales.dof_vel,                         # num_dofs
+        self.actions     
+    ), dim=-1)
+    self.vel_buf= self.base_lin_vel
+    if self.add_noise:  
+        obs_now = obs_buf.clone() + (2 * torch.rand_like(obs_buf) -1) * self.noise_scale_vec * self.cfg.noise.noise_level
+    else:
+        obs_now = obs_buf.clone()
+
+    self.privileged_obs_buf = torch.cat((
+        torch.clip(self.root_states[:, 2].unsqueeze(1) - 0.5 - self.measured_heights, -1, 1.) * self.obs_scales.height_measurements,
+        self.base_lin_vel * self.obs_scales.lin_vel,
+        self.friction_coeffs,
+        self.restitution_coeffs,
+        self.p_gains_multiplier ,             # num_actions
+        self.d_gains_multiplier,             # num_actions
+        self.commands[:, :3] * self.commands_scale,                     # 3
+        self.base_ang_vel * self.obs_scales.ang_vel,                   # 3
+        self.projected_gravity,                                         # 3
+        (self.dof_pos - self.default_dof_pos) *
+        self.obs_scales.dof_pos,  # num_dofs
+        self.dof_vel * self.obs_scales.dof_vel,                         # num_dofs
+        self.actions   
+    ), dim=-1)
+    self.obs_history.append(obs_now)
+    self.critic_history.append(self.privileged_obs_buf)
+
+    obs_buf_all = torch.stack([self.obs_history[i]
+                               for i in range(self.obs_history.maxlen)], dim=1)  # N,T,K
+
+    self.obs_buf = obs_buf_all.reshape(self.num_envs, -1)  # N, T*K
+    self.privileged_obs_buf = torch.cat([self.critic_history[i] for i in range(self.cfg.env.c_frame_stack)], dim=1)
+```
+
+文件：`legged_gym/envs/base/base_task.py:101`
+
+```python
+def get_observations(self):
+    return self.obs_buf, self.obs_hist_buf ,self.vel_buf
+    
+def get_privileged_observations(self):
+    return self.privileged_obs_buf
+```
+
+文件：`legged_gym/envs/GO2_Trot/GO2_Stairs.py:611`
+
+```python
+self.obs_history = deque(maxlen=self.cfg.env.frame_stack)
+self.critic_history = deque(maxlen=self.cfg.env.c_frame_stack)
+for _ in range(self.cfg.env.frame_stack):
+    self.obs_history.append(torch.zeros(
+        self.num_envs, self.cfg.env.num_single_obs, dtype=torch.float, device=self.device))
+for _ in range(self.cfg.env.c_frame_stack):
+    self.critic_history.append(torch.zeros(self.num_envs, self.cfg.env.single_num_privileged_obs, dtype=torch.float, device=self.device))
+self.obs_hist_buf=torch.zeros(self.num_envs, self.cfg.env.num_history_obs,  dtype=torch.float, device=self.device)
+self.vel_buf=torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device)
+```
+
+## 3. action 到关节目标
+
+文件：`legged_gym/envs/GO2_Trot/GO2_Stairs.py:44`
+
+```python
+def step(self, actions):
+    clip_actions = self.cfg.normalization.clip_actions
+    self.actions = torch.clip(actions, -clip_actions, clip_actions).to(self.device)
+    self.render()
+    for _ in range(self.cfg.control.decimation):
+        action_delayed = self.update_cmd_action_latency_buffer()
+        self.torques = self._compute_torques(action_delayed).view(self.torques.shape)
+        self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self.torques))
+        self.gym.simulate(self.sim)
+        if self.device == 'cpu':
+            self.gym.fetch_results(self.sim, True)
+        self.gym.refresh_dof_state_tensor(self.sim)
+    self.post_physics_step()
+
+    clip_obs = self.cfg.normalization.clip_observations
+    self.obs_buf = torch.clip(self.obs_buf, -clip_obs, clip_obs)
+    if self.privileged_obs_buf is not None:
+        self.privileged_obs_buf = torch.clip(self.privileged_obs_buf, -clip_obs, clip_obs)
+    return self.obs_buf, self.privileged_obs_buf,self.obs_hist_buf ,self.vel_buf, self.rew_buf, self.reset_buf, self.extras
+```
+
+文件：`legged_gym/envs/GO2_Trot/GO2_Stairs.py:77`
+
+```python
+def update_cmd_action_latency_buffer(self):
+    actions_scaled = self.actions #* self.cfg.control.action_scale
+    if self.cfg.domain_rand.add_cmd_action_latency:
+        self.cmd_action_latency_buffer[:,:,1:] = self.cmd_action_latency_buffer[:,:,:self.cfg.domain_rand.range_cmd_action_latency[1]].clone()
+        self.cmd_action_latency_buffer[:,:,0] = actions_scaled.clone()
+        action_delayed = self.cmd_action_latency_buffer[torch.arange(self.num_envs),:,self.cmd_action_latency_simstep.long()]
+    else:
+        action_delayed = actions_scaled
+    
+    return action_delayed
+```
+
+文件：`legged_gym/envs/GO2_Trot/GO2_Stairs.py:407`
+
+```python
+def _compute_torques(self, actions):
+    actions_scaled = actions * self.cfg.control.action_scale
+    torques = self.p_gains_multiplier * self.p_gains*(actions_scaled + self.default_dof_pos - self.dof_pos) - self.d_gains_multiplier * self.d_gains*self.dof_vel
+    torques*=self.torques_multiplier
+    return torch.clip(torques, -self.torque_limits, self.torque_limits)
+```
+
+文件：`legged_gym/envs/GO2_Trot/GO2_Stairs.py:594`
+
+```python
+self.default_dof_pos = torch.zeros(self.num_dof, dtype=torch.float, device=self.device, requires_grad=False)
+for i in range(self.num_dofs):
+    name = self.dof_names[i]
+    self.default_dof_pos[i] = self.cfg.init_state.default_joint_angles[name]
+    found = False
+    for dof_name in self.cfg.control.stiffness.keys():
+        if dof_name in name:
+            self.p_gains[i] = self.cfg.control.stiffness[dof_name]
+            self.d_gains[i] = self.cfg.control.damping[dof_name]
+            found = True
+    if not found:
+        self.p_gains[i] = 0.
+        self.d_gains[i] = 0.
+        if self.cfg.control.control_type in ["P", "V"]:
+            print(f"PD gain of joint {name} were not defined, setting them to zero")
+self.default_dof_pos = self.default_dof_pos.unsqueeze(0)
+```
+
+文件：`deploy/deploy_mujoco/deploy_go2.py:83`
+
+```python
+def pd_control(target_q, q, kp, target_dq, dq, kd):
+    """Calculates torques from position commands"""
+    return (target_q - q) * kp + (target_dq - dq) * kd
+```
+
+文件：`deploy/deploy_mujoco/deploy_go2.py:362`
+
+```python
+tau = pd_control(target_dof_pos, d.qpos[7:], kps, np.zeros_like(kds), d.qvel[6:], kds)
+tau = np.clip(tau, -torque_limits, torque_limits)
+d.ctrl[:] = tau
+```
+
+文件：`deploy/deploy_mujoco/deploy_go2.py:437`
+
+```python
+# transform action to target_dof_pos
+target_dof_pos = action * action_scale + default_angles
+```
+
+## 4. 模型保存和导出
+
+文件：`rsl_rl/rsl_rl/runners/dreamwaq_runner.py:224`
+
+```python
+def save(self, path, infos=None, iteration=None):
+    if iteration is None:
+        iteration = self.current_learning_iteration
+    torch.save({
+        'model_state_dict': self.alg.actor_critic.state_dict(),
+        'optimizer_state_dict': self.alg.optimizer.state_dict(),
+        'vae_optimizer_state_dict': self.alg.vae_optimizer.state_dict(),
+        'learning_rate': self.alg.learning_rate,
+        'iter': iteration,
+        'infos': infos,
+        }, path)
+```
+
+文件：`rsl_rl/rsl_rl/runners/dreamwaq_runner.py:236`
+
+```python
+def load(self, path, load_optimizer=True):
+    loaded_dict = torch.load(path, map_location=self.device)
+    if 'model_state_dict' not in loaded_dict:
+        raise KeyError(f"Checkpoint does not contain model_state_dict: {path}")
+
+    self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
+    if load_optimizer:
+        if 'optimizer_state_dict' not in loaded_dict:
+            raise KeyError(f"Checkpoint does not contain optimizer_state_dict: {path}")
+        if 'vae_optimizer_state_dict' not in loaded_dict:
+            raise KeyError(f"Checkpoint does not contain vae_optimizer_state_dict: {path}")
+        self.alg.optimizer.load_state_dict(loaded_dict['optimizer_state_dict'])
+        self.alg.vae_optimizer.load_state_dict(loaded_dict['vae_optimizer_state_dict'])
+        self.alg.learning_rate = loaded_dict.get('learning_rate', self.alg.optimizer.param_groups[0]['lr'])
+        for param_group in self.alg.optimizer.param_groups:
+            param_group['lr'] = self.alg.learning_rate
+    self.current_learning_iteration = self._resolve_loaded_iteration(path, loaded_dict.get('iter', 0))
+    return loaded_dict.get('infos')
+```
+
+文件：`rsl_rl/rsl_rl/runners/dreamwaq_runner.py:263`
+
+```python
+def get_inference_policy(self, device=None):
+    self.alg.actor_critic.eval() # switch to evaluation mode (dropout for example)
+    if device is not None:
+        self.alg.actor_critic.to(device)
+    return self.alg.actor_critic.act_inference
+```
+
+文件：`legged_gym/utils/helpers.py:221`
+
+```python
+class PolicyExporterDWAQ(torch.nn.Module):
+    def __init__(self, actor_critic, ):
+        super().__init__()
+        self.actor = copy.deepcopy(actor_critic.actor)
+        self.vae = copy.deepcopy(actor_critic.vae)
+        self.actor.eval()
+        # self.vae.eval()
+    def forward(self, obs_history):
+        (code),(code_vel,code_latent),(decode),(mean_vel,logvar_vel,mean_latent,logvar_latent)= self.vae.cenet_forward(obs_history[:,:-45])
+        actor_input = torch.cat(
+            (code,obs_history[:, -45:]), dim=1)
+        actions_mean = self.actor(actor_input)
+        return actions_mean
+
+    def export(self, path):
+        os.makedirs(path, exist_ok=True)
+        export_path = os.path.join(path, 'policy_dwaq.pt')
+        self.to('cpu')
+        self.eval()
+        with torch.no_grad():
+            traced_script_module = torch.jit.script(self)
+            traced_script_module.save(export_path)
+            print(f"模型已导出至: {export_path}")
+```
+
+```python
+def export_policy_as_dwaq(actor_critic, path, ):
+    if hasattr(actor_critic, 'vae'):
+        exporter = PolicyExporterDWAQ(actor_critic)
+        exporter.export(path)
+    else:
+        os.makedirs(path, exist_ok=True)
+        path = os.path.join(path, 'policy_1.pt')
+        model = copy.deepcopy(actor_critic.actor).to('cpu')
+        traced_script_module = torch.jit.script(model)
+        traced_script_module.save(path)
+```
+
+文件：`legged_gym/scripts/play.py:43`
+
+```python
+if EXPORT_POLICY:
+    path = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name, 'exported', 'policies')
+    if hasattr(ppo_runner.alg.actor_critic, "vae"):
+        export_policy_as_dwaq(ppo_runner.alg.actor_critic, path)
+    else:
+        export_policy_as_jit(ppo_runner.alg.actor_critic, path)
+    print('Exported policy as jit script to: ', path)
+```
+
+## 5. PPO / runner 如何调用 DreamWaQ
+
+文件：`rsl_rl/rsl_rl/runners/dreamwaq_runner.py:46`
+
+```python
+class DreamWaQRunner:
+
+    def __init__(self,
+                 env: VecEnv,
+                 train_cfg,
+                 log_dir=None,
+                 device='cpu'):
+
+        self.cfg=train_cfg["runner"]
+        self.alg_cfg = train_cfg["algorithm"]
+        self.policy_cfg = train_cfg["policy"]
+        self.device = device
+        self.env = env
+        num_critic_obs = self.env.num_privileged_obs 
+        cenet_in_dim = self.env.cfg.env.num_history_obs
+        cenet_out_dim = 19
+        actor_critic=ActorCriticDreamWaQ( self.env.num_obs,
+                                        num_critic_obs,
+                                        self.env.num_actions,
+                                        cenet_in_dim,
+                                        self.env.cfg.env.num_latent_dims,
+                                        self.env.cfg.env.num_explicit_dims,
+                                        **self.policy_cfg).to(self.device)
+        self.alg=PPO_DreamWaQ(actor_critic, device=self.device, **self.alg_cfg)
+        self.num_steps_per_env = self.cfg["num_steps_per_env"]
+        self.save_interval = self.cfg["save_interval"]
+
+        self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [num_critic_obs], [cenet_in_dim],[self.env.cfg.env.num_explicit_dims], [self.env.num_actions])
+```
+
+文件：`rsl_rl/rsl_rl/runners/dreamwaq_runner.py:84`
+
+```python
+def learn(self, num_learning_iterations, init_at_random_ep_len=False):
+    if self.log_dir is not None and self.writer is None:
+        self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
+    if init_at_random_ep_len:
+        self.env.episode_length_buf = torch.randint_like(self.env.episode_length_buf, high=int(self.env.max_episode_length))
+    obs, obs_hist,estimation= self.env.get_observations()
+    privileged_obs = self.env.get_privileged_observations()
+    critic_obs = privileged_obs if privileged_obs is not None else obs
+    obs, critic_obs, obs_hist,estimation= obs.to(self.device), critic_obs.to(self.device),obs_hist.to(self.device),estimation.to(self.device)
+    self.alg.actor_critic.train()
+
+    for it in range(self.current_learning_iteration, self.current_learning_iteration + num_learning_iterations):
+        with torch.inference_mode():
+            for i in range(self.num_steps_per_env):
+                actions = self.alg.act(obs, critic_obs,obs_hist,estimation)
+                obs, privileged_obs,obs_hist,estimation,rewards, dones, infos = self.env.step(actions)
+                critic_obs = privileged_obs if privileged_obs is not None else obs
+                obs, critic_obs,  obs_hist,estimation,rewards, dones = obs.to(self.device), critic_obs.to(self.device), obs_hist.to(self.device),estimation.to(self.device),rewards.to(self.device), dones.to(self.device)
+                self.alg.process_env_step(rewards, dones, infos)
+
+            self.alg.compute_returns(critic_obs)
+        mean_value_loss, mean_surrogate_loss, mean_vae_loss,mean_vel_estimation_loss, \
+        mean_recon_loss, mean_kl_loss, mean_ppo_kl= self.alg.update()
+```
+
+文件：`rsl_rl/rsl_rl/algorithms/ppo_dreamwaq.py:102`
+
+```python
+def act(self, obs, critic_obs,  obs_history,estimation):
+    # Compute the actions and values
+    self.transition.actions = self.actor_critic.act(obs,obs_history).detach()
+    self.transition.values = self.actor_critic.evaluate(critic_obs).detach()
+    self.transition.actions_log_prob = self.actor_critic.get_actions_log_prob(self.transition.actions).detach()
+    self.transition.action_mean = self.actor_critic.action_mean.detach()
+    self.transition.action_sigma = self.actor_critic.action_std.detach()
+    # need to record obs and critic_obs before env.step()
+    self.transition.observations = obs
+    self.transition.obs_hist = obs_history
+    self.transition.privileged_observations = critic_obs
+    self.transition.estimation = estimation
+    return self.transition.actions
+```
+
+文件：`rsl_rl/rsl_rl/algorithms/ppo_dreamwaq.py:116`
+
+```python
+def process_env_step(self, rewards, dones, infos):
+    self.transition.rewards = rewards.clone()
+    self.transition.dones = dones
+    # Bootstrapping on time outs
+    if 'time_outs' in infos:
+        self.transition.rewards += self.gamma * torch.squeeze(self.transition.values * infos['time_outs'].unsqueeze(1).to(self.device), 1)
+
+    # Record the transition
+    self.storage.add_transitions(self.transition)
+    self.transition.clear()
+    self.actor_critic.reset(dones)
+```
+
+文件：`rsl_rl/rsl_rl/algorithms/ppo_dreamwaq.py:200`
+
+```python
+# Keep the encoder fixed during PPO so old log-probs and current log-probs
+# are computed from the same observation representation. Train VAE only
+# after all PPO minibatches have consumed this rollout.
+vae_generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
+for obs_batch, critic_obs_batch,  obs_hist_batch,estimation_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, \
+    old_mu_batch, old_sigma_batch, live_batch,hid_states_batch, masks_batch in vae_generator:
+
+        vel_target = estimation_batch
+        decode_target = critic_obs_batch[:,-self.num_obs:]
+        vel_target.requires_grad = False
+        decode_target.requires_grad = False
+        (code),(code_vel,code_latent),(decode),(mean_vel,logvar_vel,mean_latent,logvar_latent) = self.actor_critic.vae.cenet_forward(obs_hist_batch)
+
+        vel_estimation_loss=nn.MSELoss()(mean_vel*live_batch,vel_target*live_batch) 
+        recon_loss= nn.MSELoss()(decode*live_batch,decode_target*live_batch)
+        kl_loss= -0.5 *  torch.mean(torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp(), dim=-1)* live_batch)
+        vae_loss=vel_estimation_loss+recon_loss+self.bata*kl_loss
+        self.vae_optimizer.zero_grad()
+        vae_loss.backward()
+        nn.utils.clip_grad_norm_(self.actor_critic.vae.parameters(), self.max_grad_norm)
+        self.vae_optimizer.step()
+```
+
+结论：
+- rollout 时 `policy.act` 输入：`obs(45), critic_obs(783), obs_history(225), estimation/base_lin_vel(3)`。
+- DreamWaQ actor 训练时使用 VAE 输出，且 `code.detach()`，PPO 更新 actor 时不会通过 actor loss 更新 VAE。
+- critic 使用 privileged obs。
+- teacher/privileged 信息不直接进入 actor；VAE 的重建 loss 使用 `critic_obs_batch[:, -self.num_obs:]`，velocity estimation target 用 `estimation_batch=base_lin_vel`。
+
+## 6. 部署输入构造
+
+文件：`deploy/deploy_mujoco/configs/go2.yaml`
+
+```yaml
+simulation_dt: 0.005
+control_decimation: 4
+
+kps: [25.0, 25.0, 25.0, 25.0, 25.0, 25.0, 25.0, 25.0, 25.0, 25.0, 25.0, 25.0] 
+kds: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5] 
+
+default_angles: [0.0,  0.8,  -1.5,  0.0, 0.8, -1.5, 
+                 0.0,  0.8,  -1.5,  0.0, 0.8, -1.5] 
+torque_limits: [23.7, 23.7, 35.55, 23.7, 23.7, 35.55,
+                23.7, 23.7, 35.55, 23.7, 23.7, 35.55]
+
+lin_vel_scale: 2.0
+ang_vel_scale: 0.25 
+dof_pos_scale: 1.0 
+dof_vel_scale: 0.05 
+action_scale: 0.25 
+cmd_scale: [2.0, 2.0, 0.25]
+num_actions: 12
+num_obs: 45
+num_history_obs: 5
+policy_input_dim: 270
+```
+
+```yaml
+mujoco_joint_names: [
+  "FL_hip_joint",
+  "FL_thigh_joint",
+  "FL_calf_joint",
+  "FR_hip_joint",
+  "FR_thigh_joint",
+  "FR_calf_joint",
+  "RL_hip_joint",
+  "RL_thigh_joint",
+  "RL_calf_joint",
+  "RR_hip_joint",
+  "RR_thigh_joint",
+  "RR_calf_joint"
+]
+
+model_joint_names: [
+  "FL_hip_joint",
+  "FL_thigh_joint",
+  "FL_calf_joint",
+  "FR_hip_joint",
+  "FR_thigh_joint",
+  "FR_calf_joint",
+  "RL_hip_joint",
+  "RL_thigh_joint",
+  "RL_calf_joint",
+  "RR_hip_joint",
+  "RR_thigh_joint",
+  "RR_calf_joint"
+]
+```
+
+文件：`deploy/deploy_mujoco/deploy_go2.py:43`
+
+```python
+def run_policy(policy, obs_tensor, num_obs, deterministic_vae):
+    if deterministic_vae and hasattr(policy, "vae") and hasattr(policy, "actor"):
+        obs_history = obs_tensor[:, :-num_obs]
+        current_obs = obs_tensor[:, -num_obs:]
+        _, _, _, latent = policy.vae.cenet_forward(obs_history, True)
+        mean_vel, _, mean_latent, _ = latent
+        return policy.actor(torch.cat((mean_vel, mean_latent, current_obs), dim=1))
+    return policy(obs_tensor)
+```
+
+文件：`deploy/deploy_mujoco/deploy_go2.py:177`
+
+```python
+num_history_obs = config["num_history_obs"]
+policy_input_dim = config["policy_input_dim"]
+expected_policy_input_dim = (num_history_obs + 1) * num_obs
+if policy_input_dim != expected_policy_input_dim:
+    raise ValueError(
+        f"policy_input_dim is {policy_input_dim}, expected {expected_policy_input_dim} "
+        f"from num_obs={num_obs} and num_history_obs={num_history_obs}."
+    )
+```
+
+文件：`deploy/deploy_mujoco/deploy_go2.py:218`
+
+```python
+obs_history = deque(maxlen=num_history_obs + 1)
+for _ in range(num_history_obs + 1):
+    obs_history.append(np.zeros(num_obs, dtype=np.float32))
+policy_input = np.zeros(policy_input_dim, dtype=np.float32)
+```
+
+文件：`deploy/deploy_mujoco/deploy_go2.py:395`
+
+```python
+obs[:3] = cmd * cmd_scale
+obs[3:6] = scaled_ang_vel
+obs[6:9] = gravity_orientation
+obs[9 : 9 + num_actions] = qj[idx_mj2model]
+obs[9 + num_actions : 9 + 2 * num_actions] = dqj[idx_mj2model]
+obs[9 + 2 * num_actions : 9 + 3 * num_actions] = action[idx_mj2model]
+obs_history.append(obs.copy())
+policy_input[:] = np.concatenate(list(obs_history), axis=0)
+obs_tensor = torch.from_numpy(policy_input).unsqueeze(0)
+```
+
+# 找不到 / 注意项
+
+- 没找到独立 `estimator` class；estimator 在 `VAE` 内。
+- 没找到独立 `encoder/adaptation module` class 名称；encoder 是 `VAE.encoder`。
+- 没找到 `ActorCriticDreamWaQ.forward()`。
+- actor obs 没找到 `height scan`。
+- actor obs 没找到 `phase`。
+- GO2_Stairs.py 中配置有 `randomize_motor_zero_offset`，但当前 GO2_Stairs.py 的 torque 公式没有用 `motor_zero_offsets`。
+- 当前 `deploy/deploy_real/deploy_real_go2.py` 与 DreamWaQ 训练/导出的 270 维输入不一致，不能直接作为当前 DreamWaQ 部署依据。

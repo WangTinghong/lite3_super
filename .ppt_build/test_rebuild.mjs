@@ -1,0 +1,14 @@
+import fs from 'node:fs/promises';
+import { FileBlob, PresentationFile } from '@oai/artifact-tool';
+const p=await PresentationFile.importPptx(await FileBlob.load('/Users/wangtinghong/Desktop/工作/副本重点突击到全面开花(1).pptx'));
+const s=p.slides.items[1];
+console.log('before',s.shapes.items.length,s.charts.items.length,s.tables.items.length,s.images.items.length);
+s.shapes.deleteAll();
+for(const c of s.charts.items) s.charts.deleteById(c.id);
+for(const t of s.tables.items) s.tables.deleteById(t.id);
+for(const i of s.images.items) s.images.deleteById(i.id);
+s.background.fill='#F6F9FC';
+const t=s.shapes.add({geometry:'textbox',position:{left:72,top:36,width:1136,height:60},fill:'none',line:{style:'solid',fill:'none',width:0}});t.text='测试重建';t.text.style={typeface:'PingFang SC',fontSize:34,bold:true,color:'#0E2B4D'};
+const box=s.shapes.add({geometry:'roundRect',position:{left:72,top:140,width:300,height:200},fill:'#DCEBFA',line:{style:'solid',fill:'#2F6BCA',width:1},borderRadius:18});box.text='测试内容';box.text.style={typeface:'PingFang SC',fontSize:20,color:'#0E2B4D'};
+console.log('after',s.shapes.items.length,s.charts.items.length,s.tables.items.length,s.images.items.length);
+const out=await s.export({format:'png',scale:1});await fs.writeFile('.ppt_build/rebuild.png',new Uint8Array(await out.arrayBuffer()));const outp=await PresentationFile.exportPptx(p);await outp.save('.ppt_build/rebuild.pptx');

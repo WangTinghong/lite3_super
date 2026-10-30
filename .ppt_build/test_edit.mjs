@@ -1,0 +1,11 @@
+import fs from 'node:fs/promises';
+import { FileBlob, PresentationFile } from '@oai/artifact-tool';
+const p=await PresentationFile.importPptx(await FileBlob.load('/Users/wangtinghong/Desktop/工作/副本重点突击到全面开花(1).pptx'));
+const title=p.resolve('sh/r65knqtk');
+title.text = '01 背景与痛点｜西京医院进入壁垒';
+title.text.style={typeface:'PingFang SC',fontSize:34,bold:true,color:'#0E2B4D'};
+title.position={left:72,top:36,width:1136,height:56};
+const box=p.resolve('sh/x4r21kru'); box.fill='#DCEBFA'; box.line={style:'solid',fill:'#2F6BCA',width:1};
+const t=p.resolve('sh/w3i1sfa9'); t.text.style={typeface:'PingFang SC',fontSize:18,bold:true,color:'#0E2B4D'};
+const s=p.resolve('sl/hwbqtkby'); const out=await s.export({format:'png',scale:1.2}); await fs.writeFile('.ppt_build/test_slide.png',new Uint8Array(await out.arrayBuffer()));
+const outp=await PresentationFile.exportPptx(p); await outp.save('.ppt_build/test.pptx');

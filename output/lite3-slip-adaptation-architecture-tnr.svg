@@ -1,0 +1,181 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1160" viewBox="0 0 1920 1160" role="img" aria-labelledby="fig-title fig-desc">
+  <title id="fig-title">Lite3 户外湿滑场景风险感知与自适应行走控制架构</title>
+  <desc id="fig-desc">上半部分展示 Lite3 的 DreamWaQ 现有推理链路、拟新增的滑移风险估计与命令调节闭环；下半部分展示局部湿滑仿真、滑移标签、非对称 PPO 训练和分级验证流程。</desc>
+  <defs>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="8.6" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#3569A8"/></marker>
+    <marker id="arrow-teal" viewBox="0 0 10 10" refX="8.6" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#13877F"/></marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="8.6" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#25824C"/></marker>
+    <marker id="arrow-gray" viewBox="0 0 10 10" refX="8.6" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#788795"/></marker>
+    <style>
+      text { font-family: "Times New Roman", "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", serif; fill: #183246; }
+      .title { font-size: 39px; font-weight: 700; fill: #102A40; }
+      .subtitle { font-size: 19px; fill: #536B7C; }
+      .section { font-size: 23px; font-weight: 700; fill: #173A55; }
+      .box-title { font-size: 21px; font-weight: 700; }
+      .body { font-size: 17px; }
+      .small { font-size: 15px; }
+      .tiny { font-size: 13px; }
+      .formula { font-size: 18px; font-style: italic; }
+      .blue-box { fill: #F1F6FB; stroke: #3569A8; stroke-width: 2.5; }
+      .teal-box { fill: #EFF8F6; stroke: #13877F; stroke-width: 2.5; stroke-dasharray: 9 6; }
+      .neutral-box { fill: #FFFFFF; stroke: #93A4B1; stroke-width: 1.8; }
+      .train-box { fill: #FFF7E8; stroke: #D3942D; stroke-width: 2.2; stroke-dasharray: 8 5; }
+      .flow-blue { fill: none; stroke: #3569A8; stroke-width: 3; marker-end: url(#arrow-blue); }
+      .flow-teal { fill: none; stroke: #13877F; stroke-width: 3; marker-end: url(#arrow-teal); }
+      .flow-green { fill: none; stroke: #25824C; stroke-width: 3; stroke-dasharray: 9 6; marker-end: url(#arrow-green); }
+      .flow-gray { fill: none; stroke: #788795; stroke-width: 2.5; marker-end: url(#arrow-gray); }
+    </style>
+  </defs>
+
+  <rect width="1920" height="1160" fill="#FFFFFF"/>
+  <text class="title" x="64" y="62">Lite3 户外湿滑场景的风险感知与自适应行走控制</text>
+  <text class="subtitle" x="66" y="105">以现有 DreamWaQ 控制链路为基线：从全局摩擦随机化，推进到局部滑移识别、风险调节与恢复闭环</text>
+
+  <g aria-label="图例">
+    <line x1="1110" y1="106" x2="1155" y2="106" stroke="#3569A8" stroke-width="4"/>
+    <text class="small" x="1165" y="111">项目已有链路</text>
+    <line x1="1300" y1="106" x2="1345" y2="106" stroke="#13877F" stroke-width="4" stroke-dasharray="9 6"/>
+    <text class="small" x="1355" y="111">建议新增模块</text>
+    <line x1="1510" y1="106" x2="1555" y2="106" stroke="#D3942D" stroke-width="4" stroke-dasharray="8 5"/>
+    <text class="small" x="1565" y="111">仿真训练特权量</text>
+  </g>
+  <line x1="64" y1="139" x2="1856" y2="139" stroke="#D9E2E8" stroke-width="2"/>
+
+  <text class="section" x="64" y="184">A. 在线推理：滑移风险估计驱动的闭环调节</text>
+
+  <!-- Main online control path -->
+  <rect class="blue-box" x="64" y="220" width="220" height="154" rx="16"/>
+  <text class="box-title" x="84" y="255">巡检速度指令</text>
+  <text class="body" x="84" y="291">期望机体速度</text>
+  <text class="formula" x="84" y="326">u<tspan baseline-shift="sub" font-size="13">cmd</tspan> = (v<tspan baseline-shift="sub" font-size="13">x</tspan>, v<tspan baseline-shift="sub" font-size="13">y</tspan>, ω<tspan baseline-shift="sub" font-size="13">z</tspan>)</text>
+  <text class="small" x="84" y="353" fill="#536B7C">巡检上层 / 人机指令</text>
+
+  <rect class="teal-box" x="340" y="220" width="300" height="154" rx="16"/>
+  <text class="box-title" x="360" y="255" fill="#0D706B">风险感知命令监督器</text>
+  <text class="formula" x="360" y="293">u<tspan baseline-shift="sub" font-size="13">safe</tspan> = α(r<tspan baseline-shift="sub" font-size="13">t</tspan>) · u<tspan baseline-shift="sub" font-size="13">cmd</tspan></text>
+  <text class="body" x="360" y="324">高风险：平滑限速 / 限转向</text>
+  <text class="small" x="360" y="351">风险降低后再渐进恢复（滞回）</text>
+
+  <rect class="blue-box" x="700" y="204" width="470" height="186" rx="16"/>
+  <text class="box-title" x="720" y="239">现有 DreamWaQ 主策略</text>
+  <rect x="720" y="258" width="190" height="91" rx="12" fill="#E6EFF8" stroke="#8AA9C8" stroke-width="1.5"/>
+  <text class="body" x="738" y="286" font-weight="700">VAE 历史编码器</text>
+  <text class="small" x="738" y="313">5 × 45 = 225</text>
+  <text class="small" x="738" y="336">输出 z(16) + v̂(3)</text>
+  <path class="flow-blue" d="M 910 304 L 930 304"/>
+  <rect x="936" y="258" width="214" height="91" rx="12" fill="#E6EFF8" stroke="#8AA9C8" stroke-width="1.5"/>
+  <text class="body" x="955" y="286" font-weight="700">Actor MLP</text>
+  <text class="small" x="955" y="313">45 + 16 + 3 = 64</text>
+  <text class="small" x="955" y="336">输出 12 维关节动作 a<tspan baseline-shift="sub" font-size="11">t</tspan></text>
+  <text class="tiny" x="720" y="374" fill="#536B7C">Actor 仅用本体观测与历史；不直接输入摩擦真值</text>
+
+  <rect class="blue-box" x="1245" y="220" width="260" height="154" rx="16"/>
+  <text class="box-title" x="1265" y="255">关节目标与 PD 控制</text>
+  <text class="formula" x="1265" y="291">q<tspan baseline-shift="sub" font-size="13">ref</tspan> = q<tspan baseline-shift="sub" font-size="13">0</tspan> + 0.25 a<tspan baseline-shift="sub" font-size="13">t</tspan></text>
+  <text class="body" x="1265" y="323">Kp = 20，Kd = 0.7</text>
+  <text class="small" x="1265" y="351">12 DoF · 控制降采样 4</text>
+
+  <rect class="blue-box" x="1570" y="210" width="286" height="184" rx="16"/>
+  <text class="box-title" x="1590" y="245">Lite3 户外巡检</text>
+  <!-- Schematic Lite3 quadruped and mixed-friction ground -->
+  <g fill="none" stroke="#274B68" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" aria-label="四足机器人示意">
+    <path d="M 1633 284 Q 1642 270 1664 272 L 1765 272 Q 1785 274 1792 289 L 1784 314 L 1642 314 Z" fill="#DDE8EF" stroke-width="3"/>
+    <path d="M 1651 312 L 1645 333 L 1628 348 L 1628 356"/>
+    <path d="M 1676 312 L 1683 335 L 1675 352 L 1675 357"/>
+    <path d="M 1751 312 L 1745 334 L 1755 351 L 1755 357"/>
+    <path d="M 1776 312 L 1787 333 L 1804 347 L 1804 357"/>
+    <path d="M 1620 358 L 1637 358 M 1667 358 L 1685 358 M 1747 358 L 1764 358 M 1796 358 L 1813 358" stroke-width="4"/>
+    <circle cx="1645" cy="312" r="5" fill="#274B68" stroke="none"/>
+    <circle cx="1678" cy="312" r="5" fill="#274B68" stroke="none"/>
+    <circle cx="1748" cy="312" r="5" fill="#274B68" stroke="none"/>
+    <circle cx="1782" cy="312" r="5" fill="#274B68" stroke="none"/>
+  </g>
+  <rect x="1590" y="365" width="92" height="10" rx="3" fill="#B8C9D5"/>
+  <rect x="1682" y="365" width="67" height="10" rx="3" fill="#84C9C2"/>
+  <rect x="1749" y="365" width="87" height="10" rx="3" fill="#B8C9D5"/>
+  <text class="tiny" x="1590" y="389">乾地</text><text class="tiny" x="1685" y="389" fill="#0D706B">局部濕滑</text><text class="tiny" x="1766" y="389">乾地</text>
+
+  <path class="flow-blue" d="M 284 297 L 340 297"/>
+  <path class="flow-blue" d="M 640 297 L 700 297"/>
+  <path class="flow-blue" d="M 1170 297 L 1245 297"/>
+  <path class="flow-blue" d="M 1505 297 L 1570 297"/>
+
+  <!-- Observation and new slip-risk modules -->
+  <rect class="teal-box" x="340" y="470" width="300" height="152" rx="16"/>
+  <text class="box-title" x="360" y="505" fill="#0D706B">滑移风险估计器（新增）</text>
+  <text class="body" x="360" y="540">时间窗本体状态 + 速度残差</text>
+  <text class="formula" x="360" y="574">p<tspan baseline-shift="sub" font-size="13">slip</tspan>(t) = P(支撑足发生滑移)</text>
+  <text class="small" x="360" y="602">部署时只依赖本体时序观测</text>
+
+  <rect class="blue-box" x="700" y="470" width="390" height="152" rx="16"/>
+  <text class="box-title" x="720" y="505">本体观测与历史缓存</text>
+  <text class="body" x="720" y="540">obs<tspan baseline-shift="sub" font-size="12">t</tspan> (45D)：命令3 + IMU6</text>
+  <text class="body" x="720" y="568">关节 q/q̇24 + 前一动作12</text>
+  <text class="small" x="720" y="598">历史 5 帧 × 45 = 225D → VAE</text>
+
+  <path class="flow-teal" d="M 490 470 L 490 374"/>
+  <text class="small" x="502" y="432" fill="#0D706B">p<tspan baseline-shift="sub" font-size="11">slip</tspan>(t)</text>
+  <path class="flow-blue" d="M 900 470 L 900 390"/>
+  <text class="small" x="912" y="432" fill="#3569A8">obs / history</text>
+  <path class="flow-teal" d="M 700 545 L 640 545"/>
+
+  <!-- Feedback path from robot to proprioception -->
+  <path d="M 1710 394 L 1710 432 L 1020 432 L 1020 470" fill="none" stroke="#3569A8" stroke-width="2.7" marker-end="url(#arrow-blue)"/>
+  <text class="small" x="1270" y="423" fill="#3569A8">环境交互后的 IMU / 关节状态回传</text>
+
+  <line x1="64" y1="658" x2="1856" y2="658" stroke="#D9E2E8" stroke-width="1.5"/>
+  <text class="section" x="64" y="703">B. 仿真训练：局部湿滑域随机化、可解释滑移标签与非对称策略更新</text>
+
+  <!-- Training pipeline blocks -->
+  <rect class="neutral-box" x="64" y="754" width="420" height="246" rx="16"/>
+  <text class="box-title" x="86" y="790">湿滑训练场景（现有 + 扩展）</text>
+  <rect x="84" y="809" width="380" height="66" rx="10" fill="#EAF2FA"/>
+  <text class="small" x="100" y="835" font-weight="700" fill="#315F97">现有基线</text>
+  <text class="body" x="100" y="860">每环境全局摩擦随机化 μ ∈ [0.1, 1.25]</text>
+  <rect x="84" y="888" width="380" height="91" rx="10" fill="#EAF6F4" stroke="#13877F" stroke-width="1.5" stroke-dasharray="7 5"/>
+  <text class="small" x="100" y="914" font-weight="700" fill="#0D706B">建议新增：空间非均匀湿滑</text>
+  <text class="body" x="100" y="940">μ(x,y) 局部斑块、干湿边界</text>
+  <text class="small" x="100" y="964">随机斑块位置 / 面积 / 摩擦梯度与坡度</text>
+
+  <rect class="train-box" x="530" y="754" width="380" height="246" rx="16"/>
+  <text class="box-title" x="552" y="790">滑移事件标签（仿真训练用）</text>
+  <text class="body" x="552" y="829">由模拟器接触状态与足端运动生成</text>
+  <rect x="552" y="848" width="336" height="54" rx="10" fill="#FFF0D2"/>
+  <text class="formula" x="571" y="882">y<tspan baseline-shift="sub" font-size="13">slip</tspan> = contact ∧ ‖v<tspan baseline-shift="sub" font-size="13">foot,tan</tspan>‖ &gt; ε</text>
+  <text class="small" x="552" y="930">监督时序风险头；ε 由仿真 / 实验标定</text>
+  <text class="small" x="552" y="960">部署不需要摩擦真值或仿真接触力</text>
+  <text class="tiny" x="552" y="984" fill="#7B6341">支撑相门控可降低摆动期误报</text>
+
+  <rect class="neutral-box" x="956" y="754" width="470" height="246" rx="16"/>
+  <text class="box-title" x="978" y="790">PPO–DreamWaQ + 风险辅助学习</text>
+  <rect x="978" y="809" width="194" height="82" rx="10" fill="#EDF4FA"/>
+  <text class="small" x="994" y="834" font-weight="700" fill="#315F97">Actor（部署侧）</text>
+  <text class="small" x="994" y="858">本体 obs + 历史</text>
+  <text class="tiny" x="994" y="879">不输入摩擦特权量</text>
+  <rect x="1188" y="809" width="216" height="82" rx="10" fill="#FFF2D9" stroke="#D3942D" stroke-width="1.3"/>
+  <text class="small" x="1204" y="834" font-weight="700" fill="#95631A">Critic（训练特权）</text>
+  <text class="small" x="1204" y="858">μ、地形 / 高度、真实速度</text>
+  <text class="tiny" x="1204" y="879">仅用于价值评估</text>
+  <text class="small" x="978" y="922">联合目标：L<tspan baseline-shift="sub" font-size="11">PPO</tspan> + λ<tspan baseline-shift="sub" font-size="11">s</tspan>L<tspan baseline-shift="sub" font-size="11">slip</tspan> + 原 VAE 损失</text>
+  <text class="small" x="978" y="947">保留速度估计 / 重建项；更新 Actor、VAE 与风险头</text>
+  <text class="tiny" x="978" y="978" fill="#536B7C">消融：当前策略 vs 摩擦随机化 vs 风险闭环</text>
+
+  <rect class="neutral-box" x="1472" y="754" width="384" height="246" rx="16"/>
+  <text class="box-title" x="1494" y="790">分级验证与工程验收</text>
+  <text class="body" x="1494" y="829">MuJoCo → 受控湿地 → 户外限定路线</text>
+  <text class="small" x="1494" y="859">指标：任务成功 / 跌倒率、滑移距离</text>
+  <text class="small" x="1494" y="886">恢复时间、速度误差、单位距离能耗</text>
+  <line x1="1494" y1="905" x2="1834" y2="905" stroke="#D9E2E8" stroke-width="1.5"/>
+  <text class="small" x="1494" y="934" font-weight="700" fill="#0D706B">工程验收约束</text>
+  <text class="small" x="1494" y="961">湿滑提升，同时不退化干地与已掌握楼梯</text>
+  <text class="tiny" x="1494" y="985" fill="#536B7C">真机先低速、防摔保护、可控湿地验证</text>
+
+  <path class="flow-gray" d="M 484 875 L 530 875"/>
+  <path class="flow-gray" d="M 910 875 L 956 875"/>
+  <path class="flow-gray" d="M 1426 875 L 1472 875"/>
+
+  <line x1="64" y1="1030" x2="1856" y2="1030" stroke="#D9E2E8" stroke-width="1.5"/>
+  <text class="tiny" x="66" y="1060" fill="#536B7C">项目基线：Lite3_Stairs_config.py（摩擦范围 0.1–1.25、action scale 0.25、Kp/Kd=20/0.7）；DreamWaQ actor 输入 45+16+3=64，VAE 历史 225，输出 12 维动作。</text>
+  <text class="tiny" x="66" y="1085" fill="#536B7C">研究建议：局部湿滑随机化、滑移风险辅助头与命令监督器属于拟新增方案，不代表当前代码已实现；上线风险估计仅用可部署的本体时序观测。</text>
+  <text class="small" x="1854" y="1126" text-anchor="end" fill="#718391">Lite3 · 湿滑鲁棒行走技术路线</text>
+</svg>

@@ -1,0 +1,87 @@
+{"kind":"deck","id":"pr/t8u14v","name":"Deck"}
+{"kind":"layout","layoutId":"/ppt/slideMasters/slideMaster1.xml","name":"","type":"master","placeholders":[{"name":"title","type":"title"},{"name":"body","type":"body"},{"name":"dateTime","type":"dateTime"},{"name":"footer","type":"footer"},{"name":"slideNumber","type":"slideNumber"}]}
+{"kind":"layout","layoutId":"/ppt/slideLayouts/slideLayout1.xml","name":"TITLE","type":"title","placeholders":[{"name":"title","type":"title"},{"name":"subtitle","type":"subtitle"},{"name":"dateTime","type":"dateTime"},{"name":"footer","type":"footer"},{"name":"slideNumber","type":"slideNumber"}]}
+{"kind":"layout","layoutId":"/ppt/slideLayouts/slideLayout2.xml","name":"OBJECT","type":"obj","placeholders":[{"name":"title","type":"title"},{"name":"body","type":"body"},{"name":"dateTime","type":"dateTime"},{"name":"footer","type":"footer"},{"name":"slideNumber","type":"slideNumber"}]}
+{"kind":"layout","layoutId":"/ppt/slideLayouts/slideLayout3.xml","name":"SECTION_HEADER","type":"secHead","placeholders":[{"name":"title","type":"title"},{"name":"body","type":"body"},{"name":"dateTime","type":"dateTime"},{"name":"footer","type":"footer"},{"name":"slideNumber","type":"slideNumber"}]}
+{"kind":"layout","layoutId":"/ppt/slideLayouts/slideLayout4.xml","name":"TWO_OBJECTS","type":"twoObj","placeholders":[{"name":"title","type":"title"},{"name":"body","type":"body"},{"name":"body","type":"body"},{"name":"dateTime","type":"dateTime"},{"name":"footer","type":"footer"},{"name":"slideNumber","type":"slideNumber"}]}
+{"kind":"layout","layoutId":"/ppt/slideLayouts/slideLayout5.xml","name":"TWO_OBJECTS_WITH_TEXT","type":"twoTxTwoObj","placeholders":[{"name":"title","type":"title"},{"name":"body","type":"body"},{"name":"body","type":"body"},{"name":"body","type":"body"},{"name":"body","type":"body"},{"name":"dateTime","type":"dateTime"},{"name":"footer","type":"footer"},{"name":"slideNumber","type":"slideNumber"}]}
+{"kind":"layout","layoutId":"/ppt/slideLayouts/slideLayout6.xml","name":"TITLE_ONLY","type":"titleOnly","placeholders":[{"name":"title","type":"title"},{"name":"dateTime","type":"dateTime"},{"name":"footer","type":"footer"},{"name":"slideNumber","type":"slideNumber"}]}
+{"kind":"layout","layoutId":"/ppt/slideLayouts/slideLayout7.xml","name":"BLANK","type":"blank","placeholders":[{"name":"dateTime","type":"dateTime"},{"name":"footer","type":"footer"},{"name":"slideNumber","type":"slideNumber"}]}
+{"kind":"layout","layoutId":"/ppt/slideLayouts/slideLayout8.xml","name":"OBJECT_WITH_CAPTION_TEXT","type":"objTx","placeholders":[{"name":"title","type":"title"},{"name":"body","type":"body"},{"name":"body","type":"body"},{"name":"dateTime","type":"dateTime"},{"name":"footer","type":"footer"},{"name":"slideNumber","type":"slideNumber"}]}
+{"kind":"layout","layoutId":"/ppt/slideLayouts/slideLayout9.xml","name":"PICTURE_WITH_CAPTION_TEXT","type":"picTx","placeholders":[{"name":"title","type":"title"},{"name":"picture","type":"picture"},{"name":"body","type":"body"},{"name":"dateTime","type":"dateTime"},{"name":"footer","type":"footer"},{"name":"slideNumber","type":"slideNumber"}]}
+{"kind":"layout","layoutId":"/ppt/slideLayouts/slideLayout10.xml","name":"VERTICAL_TEXT","type":"vertTx","placeholders":[{"name":"title","type":"title"},{"name":"body","type":"body"},{"name":"dateTime","type":"dateTime"},{"name":"footer","type":"footer"},{"name":"slideNumber","type":"slideNumber"}]}
+{"kind":"layout","layoutId":"/ppt/slideLayouts/slideLayout11.xml","name":"VERTICAL_TITLE_AND_VERTICAL_TEXT","type":"vertTitleAndTx","placeholders":[{"name":"title","type":"title"},{"name":"body","type":"body"},{"name":"dateTime","type":"dateTime"},{"name":"footer","type":"footer"},{"name":"slideNumber","type":"slideNumber"}]}
+{"kind":"layout","layoutId":"/ppt/slideMasters/slideMaster2.xml","name":"","type":"master"}
+{"kind":"layout","layoutId":"/ppt/slideLayouts/slideLayout12.xml","name":"","type":"title"}
+{"kind":"layout","layoutId":"/ppt/slideMasters/slideMaster3.xml","name":"","type":"master","placeholders":[{"name":"title","type":"title","textPreview":"单击此处编辑母版标题样式"},{"name":"body","type":"body","textPreview":"单击此处编辑母版文本样式 | 第二级 | 第三级 | 第四级 | 第五级"},{"name":"dateTime","type":"dateTime"},{"name":"footer","type":"footer"},{"name":"slideNumber","type":"slideNumber"}]}
+{"kind":"layout","layoutId":"/ppt/slideLayouts/slideLayout13.xml","name":"标题幻灯片","placeholders":[{"name":"title","type":"title","textPreview":"单击此处编辑母版标题样式"},{"name":"subtitle","type":"subtitle","textPreview":"单击此处编辑副标题"},{"name":"dateTime","type":"dateTime"},{"name":"footer","type":"footer"},{"name":"slideNumber","type":"slideNumber"},{"name":"body","type":"body","textPreview":"公司名"},{"name":"body","type":"body","textPreview":"署名"}]}
+{"kind":"layout","layoutId":"/ppt/slideLayouts/slideLayout14.xml","name":"标题和内容","type":"obj","placeholders":[{"name":"title","type":"title","textPreview":"单击此处编辑母版标题样式"},{"name":"2","textPreview":"单击此处编辑母版文本样式 | 第二级 | 第三级 | 第四级 | 第五级"},{"name":"dateTime","type":"dateTime"},{"name":"footer","type":"footer"},{"name":"slideNumber","type":"slideNumber"}]}
+{"kind":"layout","layoutId":"/ppt/slideLayouts/slideLayout15.xml","name":"目录","placeholders":[{"name":"title","type":"title","textPreview":"标题"},{"name":"dateTime","type":"dateTime"},{"name":"footer","type":"footer"},{"name":"slideNumber","type":"slideNumber"}]}
+{"kind":"layout","layoutId":"/ppt/slideLayouts/slideLayout16.xml","name":"节标题","placeholders":[{"name":"title","type":"title","textPreview":"单击此处编辑母版标题样式"},{"name":"body","type":"body","textPreview":"节编号"},{"name":"dateTime","type":"dateTime"},{"name":"footer","type":"footer"},{"name":"slideNumber","type":"slideNumber"}]}
+{"kind":"layout","layoutId":"/ppt/slideLayouts/slideLayout17.xml","name":"两栏内容","type":"twoObj","placeholders":[{"name":"title","type":"title","textPreview":"单击此处编辑母版标题样式"},{"name":"2","textPreview":"单击此处编辑母版文本样式 | 第二级 | 第三级 | 第四级 | 第五级"},{"name":"3","textPreview":"单击此处编辑母版文本样式 | 第二级 | 第三级 | 第四级 | 第五级"},{"name":"dateTime","type":"dateTime"},{"name":"footer","type":"footer"},{"name":"slideNumber","type":"slideNumber"}]}
+{"kind":"layout","layoutId":"/ppt/slideLayouts/slideLayout18.xml","name":"比较","type":"twoTxTwoObj","placeholders":[{"name":"title","type":"title","textPreview":"单击此处编辑母版标题样式"},{"name":"body","type":"body","textPreview":"单击此处编辑母版标题样式"},{"name":"3","textPreview":"单击此处编辑母版文本样式 | 第二级 | 第三级 | 第四级 | 第五级"},{"name":"body","type":"body","textPreview":"单击此处编辑母版标题样式"},{"name":"5","textPreview":"单击此处编辑母版文本样式 | 第二级 | 第三级 | 第四级 | 第五级"},{"name":"dateTime","type":"dateTime"},{"name":"footer","type":"footer"},{"name":"slideNumber","type":"slideNumber"}]}
+{"kind":"layout","layoutId":"/ppt/slideLayouts/slideLayout19.xml","name":"仅标题","type":"titleOnly","placeholders":[{"name":"title","type":"title","textPreview":"单击此处编辑母版标题样式"},{"name":"dateTime","type":"dateTime"},{"name":"footer","type":"footer"},{"name":"slideNumber","type":"slideNumber"}]}
+{"kind":"layout","layoutId":"/ppt/slideLayouts/slideLayout20.xml","name":"空白","type":"blank","placeholders":[{"name":"dateTime","type":"dateTime"},{"name":"footer","type":"footer"},{"name":"slideNumber","type":"slideNumber"}]}
+{"kind":"layout","layoutId":"/ppt/slideLayouts/slideLayout21.xml","name":"仅内容","placeholders":[{"name":"1","textPreview":"单击此处编辑母版文本样式 | 第二级 | 第三级 | 第四级 | 第五级"},{"name":"dateTime","type":"dateTime"},{"name":"footer","type":"footer"},{"name":"slideNumber","type":"slideNumber"}]}
+{"kind":"layout","layoutId":"/ppt/slideLayouts/slideLayout22.xml","name":"标题和副标题","placeholders":[{"name":"title","type":"title","textPreview":"单击此处编辑母版标题样式"},{"name":"body","type":"body","textPreview":"单击此处编辑副标题"},{"name":"dateTime","type":"dateTime"},{"name":"footer","type":"footer"},{"name":"slideNumber","type":"slideNumber"}]}
+{"kind":"layout","layoutId":"/ppt/slideLayouts/slideLayout23.xml","name":"末尾幻灯片","placeholders":[{"name":"title","type":"title","textPreview":"单击此处编辑母版标题样式"},{"name":"subtitle","type":"subtitle","textPreview":"单击此处编辑副标题"},{"name":"dateTime","type":"dateTime"},{"name":"footer","type":"footer"},{"name":"slideNumber","type":"slideNumber"},{"name":"body","type":"body","textPreview":"公司名"},{"name":"body","type":"body","textPreview":"署名"}]}
+{"kind":"slide","id":"sl/y90nupkv","slide":1,"title":"重点突击-全面开花","textShapes":2}
+{"kind":"textbox","id":"sh/k3yl0zql","slide":1,"name":"标题 2","placeholder":"title","text":"重点突击-全面开花","textPreview":"重点突击-全面开花","textChars":9,"textLines":1,"bbox":[73.07,37.8,1133.87,219.93]}
+{"kind":"textbox","id":"sh/7qp4be9c","slide":1,"name":"文本框 3","text":"汇报人：郑阳阳\nDM：北京-赵国兴\nRM：北京-李萍","textPreview":"汇报人：郑阳阳 | DM：北京-赵国兴 | RM：北京-李萍","textChars":26,"textLines":3,"bbox":[496.4,507.87,312.73,198.8]}
+{"kind":"notes","id":"nt/y90nupkv","slide":1,"text":""}
+{"kind":"slide","id":"sl/hwbqtkby","slide":2,"title":"测试重建","textShapes":2}
+{"kind":"textbox","id":"sh/mxgjm5s7","slide":2,"text":"测试重建","textPreview":"测试重建","textChars":4,"textLines":1,"bbox":[72,36,1136,60]}
+{"kind":"textbox","id":"sh/9072xkry","slide":2,"text":"测试内容","textPreview":"测试内容","textChars":4,"textLines":1,"bbox":[72,140,300,200]}
+{"kind":"notes","id":"nt/hwbqtkby","slide":2,"text":"本页重点阐述了乐复诺在西京医院面临的严峻背景与核心痛点。我们的目标客户是西京医院的王胜春教授，尽管其门诊量巨大，但医院有严格的制度壁垒，不处方院外产品。同时，医生对乐复诺缺乏认知，且现有方案已能满足需求，这构成了我们进入市场的三重障碍。医生的灵魂拷问——“为何冒险用新药”，正是我们需要解决的核心问题。目前，产品处于零准入、零使用、零认知的“三零”困境，突破迫在眉睫。"}
+{"kind":"slide","id":"sl/ofy9wn61","slide":3,"title":"01 需求洞察","textShapes":9}
+{"kind":"textbox","id":"sh/298ryl4v","slide":3,"name":"AutoShape 4","text":"01 需求洞察","textPreview":"01 需求洞察","textChars":7,"textLines":1,"bbox":[80,226.67,240,66.67]}
+{"kind":"textbox","id":"sh/3ah8rqlg","slide":3,"name":"AutoShape 5","text":"02 精准切入","textPreview":"02 精准切入","textChars":7,"textLines":1,"bbox":[373.33,226.67,240,66.67]}
+{"kind":"textbox","id":"sh/obq90bml","slide":3,"name":"AutoShape 6","text":"03 建立信任","textPreview":"03 建立信任","textChars":7,"textLines":1,"bbox":[666.67,226.67,240,66.67]}
+{"kind":"textbox","id":"sh/pcjqtg36","slide":3,"name":"AutoShape 7","text":"04 观念升级","textPreview":"04 观念升级","textChars":7,"textLines":1,"bbox":[960,226.67,240,66.67]}
+{"kind":"shape","id":"sh/m5cra54z","slide":3,"name":"AutoShape 8","bbox":[73.33,346.67,253.33,320]}
+{"kind":"textbox","id":"sh/n6ls3alk","slide":3,"name":"AutoShape 9","text":"识别客户对“安全”和“无风险”的深层诉求，利用乐复诺唯一的青少年适应症作为机会点切入。","textPreview":"识别客户对“安全”和“无风险”的深层诉求，利用乐复诺唯一的青少年适应症作为机会点切入。","textChars":43,"textLines":1,"bbox":[86.67,366.67,226.67,280]}
+{"kind":"shape","id":"sh/n2l4fq98","slide":3,"name":"AutoShape 10","bbox":[366.67,346.67,253.33,320]}
+{"kind":"textbox","id":"sh/m1c3mlsn","slide":3,"name":"AutoShape 11","text":"锁定青少年患者和竞品应答不佳患者，用“一句话话术”打开对话。","textPreview":"锁定青少年患者和竞品应答不佳患者，用“一句话话术”打开对话。","textChars":30,"textLines":1,"bbox":[380,366.67,226.67,280]}
+{"kind":"shape","id":"sh/943mhgre","slide":3,"name":"AutoShape 12","bbox":[660,346.67,253.33,320]}
+{"kind":"textbox","id":"sh/83ulovat","slide":3,"name":"AutoShape 13","text":"通过共同管理患者、及时回顾疗效，利用真实成功案例撬动医生观念。","textPreview":"通过共同管理患者、及时回顾疗效，利用真实成功案例撬动医生观念。","textChars":31,"textLines":1,"bbox":[673.33,366.67,226.67,280]}
+{"kind":"shape","id":"sh/v6l4jq94","slide":3,"name":"AutoShape 14","bbox":[953.33,346.67,253.33,320]}
+{"kind":"textbox","id":"sh/a5c3ql8z","slide":3,"name":"AutoShape 15","text":"将青少年患者群体应用场景从特殊人群扩展至更广泛的斑秃患者，打造临床治疗首选方案；通过长期处方建议提升患者依从性，实现产品全面渗透与观念升级。","textPreview":"将青少年患者群体应用场景从特殊人群扩展至更广泛的斑秃患者，打造临床治疗首选方案；通过长期处方建议提升患者依从性，实现产品全面渗透与观念升级。","textChars":70,"textLines":1,"bbox":[966.67,366.67,226.67,280]}
+{"kind":"textbox","id":"sh/x8nml0ra","slide":3,"name":"标题 15","placeholder":"title","text":"02 干货、方法论与核心做法：四步破局法","textPreview":"02 干货、方法论与核心做法：四步破局法","textChars":20,"textLines":1,"bbox":[0,0,0,0]}
+{"kind":"notes","id":"nt/ofy9wn61","slide":3,"text":"面对困境，我们制定了“四步破局法”。第一步，洞察需求。我们发现医生真正需要的是一个能规避风险的方案，而乐复诺唯一的青少年适应症正好满足了这一点。第二步，精准切入。我们锁定青少年患者和竞品应答不佳的患者作为突破口，用一句精准的话术打开了对话。第三步，建立信任。通过共同管理患者、及时回顾疗效，特别是一个成功的青少年案例，让医生亲眼见证了效果。最后一步，观念升级。在建立信任后，我们推动乐复诺成为更广泛人群的首选方案，并通过长期处方建议提升了患者依从性。"}
+{"kind":"slide","id":"sl/jyx0ra1s","slide":4,"title":"可复制方法论","textShapes":3}
+{"kind":"shape","id":"sh/rm1k7yt4","slide":4,"name":"AutoShape 3","bbox":[969.2,137,240,373.33]}
+{"kind":"textbox","id":"sh/ql8jytsj","slide":4,"name":"AutoShape 4","text":"可复制方法论\n1. 锁定关键医生\n2. 识别核心需求\n3. 锁定突破类型\n4. 针对性信息传递\n5. 巩固与升级","textPreview":"可复制方法论 | 1. 锁定关键医生 | 2. 识别核心需求 | 3. 锁定突破类型 | 4. 针对性信息传递 | 5. 巩固与升级","textChars":56,"textLines":6,"bbox":[973.33,226.67,213.33,346.67]}
+{"kind":"shape","id":"sh/doj29oba","slide":4,"name":"AutoShape 5","bbox":[80,613.33,1120,80]}
+{"kind":"textbox","id":"sh/sna103ap","slide":4,"name":"AutoShape 6","text":"一句话复制：选对“核心KOL”医生，洞察核心顾虑，用真实病例建立信任，实现观念进阶与业绩的双重突破。","textPreview":"一句话复制：选对“核心KOL”医生，洞察核心顾虑，用真实病例建立信任，实现观念进阶与业绩的双重突破。","textChars":50,"textLines":1,"bbox":[93.33,626.67,1093.33,53.33]}
+{"kind":"textbox","id":"sh/kbm987y5","slide":4,"name":"标题 9","placeholder":"title","text":"03 取得的效果：从破冰到引领","textPreview":"03 取得的效果：从破冰到引领","textChars":15,"textLines":1,"bbox":[0,0,0,0]}
+{"kind":"chart","id":"ch/pwrm5kvq","slide":4,"name":"Chart 3","chartType":"bar","title":"业绩增长","bbox":[80,213.33,266.67,373.33]}
+{"kind":"table","id":"tb/1g3ex4zu","slide":4,"name":"Table 7","rows":5,"cols":3,"preview":"观念维度 | 起始状态 | 6个月后状态","bbox":[346.73,136.93,605,460.4]}
+{"kind":"notes","id":"nt/jyx0ra1s","slide":4,"text":"本页重点展示了我们取得的核心效果。首先是业绩的指数级增长，月均处方量从2盒飙升至150盒。其次是医生观念的根本转变，从最初的抗拒到主动将乐复诺作为优势患者的首选。同时，处方周期也从短期的DOT 1延长到了规范的DOT 6。更重要的是，我们沉淀出了一套可复制的成功方法论。最后总结为一句话：选对关键医生，洞察核心顾虑，用病例建立信任，就能实现观念与业绩的双重突破。"}
+{"kind":"slide","id":"sl/i107q5of","slide":5,"title":"2024年准入：延安大学咸阳医院","textShapes":4}
+{"kind":"shape","id":"sh/povid4ra","slide":5,"name":"任意多边形 45","bbox":[0,0,1280,389.53]}
+{"kind":"shape","id":"sh/epwnm5of","slide":5,"name":"圆角矩形 224","bbox":[873.29,185.57,333.01,435.8]}
+{"kind":"shape","id":"sh/1sn6hknq","slide":5,"name":"圆角矩形 225","bbox":[475.48,185.57,333.14,435.8]}
+{"kind":"shape","id":"sh/0re5of65","slide":5,"name":"圆角矩形 226","bbox":[77.8,185.57,333.01,435.8]}
+{"kind":"textbox","id":"sh/rmlobq5o","slide":5,"name":"圆角矩形 227","text":"2024年准入：延安大学咸阳医院\n2025年准入：唐都医院（正式）\n2026准入目标：西安医学院第二附属医院（临采2次）","textPreview":"2024年准入：延安大学咸阳医院 | 2025年准入：唐都医院（正式） | 2026准入目标：西安医学院第二附属医院（临采2次）","textChars":60,"textLines":3,"bbox":[873.29,185.57,333.01,435.8]}
+{"kind":"shape","id":"sh/qlcni5o3","slide":5,"name":"椭圆 228","bbox":[1006.63,219.83,66.26,66.26]}
+{"kind":"shape","id":"sh/gralcrm1","slide":5,"name":"直接连接符 229","bbox":[1019.04,578.76,41.44,0]}
+{"kind":"textbox","id":"sh/ups3a14v","slide":5,"name":"圆角矩形 231","text":"目前辖区已累计处方客户数共计53位,较去年新增7位处方客户;\n超A客户：3位\nA客户：3位  B客户：5 其他 CD客户","textPreview":"目前辖区已累计处方客户数共计53位,较去年新增7位处方客户; | 超A客户：3位 | A客户：3位  B客户：5 其他 CD客户","textChars":60,"textLines":3,"bbox":[475.48,185.57,333.14,435.8]}
+{"kind":"shape","id":"sh/vq14j6lg","slide":5,"name":"椭圆 232","bbox":[608.89,219.83,66.26,66.26]}
+{"kind":"shape","id":"sh/5wjmpg3i","slide":5,"name":"直接连接符 234","bbox":[621.3,578.76,41.44,0]}
+{"kind":"textbox","id":"sh/its3e147","slide":5,"name":"圆角矩形 235","text":"辖区市场：西北五省，幅员辽阔\n陕西：9家   破冰9家（7家）\n新疆：3家  破冰2家\n宁夏：2家   破冰1家\n兰州：3家  破冰2家\n青海：2家  破冰1家","textPreview":"辖区市场：西北五省，幅员辽阔 | 陕西：9家   破冰9家（7家） | 新疆：3家  破冰2家 | 宁夏：2家   破冰1家 | 兰州：3家  破冰2家 | 青海：2家  破冰1家","textChars":80,"textLines":6,"bbox":[77.8,185.57,333.01,435.8]}
+{"kind":"shape","id":"sh/3u14n6ls","slide":5,"name":"椭圆 236","bbox":[211.21,219.83,66.26,66.26]}
+{"kind":"shape","id":"sh/l0z2dc3e","slide":5,"name":"直接连接符 238","bbox":[223.55,578.76,41.44,0]}
+{"kind":"textbox","id":"sh/cf2tcr61","slide":5,"name":"标题 1","text":"市场回顾","textPreview":"市场回顾","textChars":4,"textLines":1,"bbox":[73.07,41.41,1133.86,83.15]}
+{"kind":"image","id":"im/8jmhwvmh","slide":5,"name":"图片 11","bbox":[1026.07,240.24,27.36,27.36]}
+{"kind":"image","id":"im/9kvip0nm","slide":5,"name":"图片 3","bbox":[628.33,240.24,27.36,27.36]}
+{"kind":"image","id":"im/mhkzul4b","slide":5,"name":"图片 4","bbox":[230.65,239.27,27.37,27.37]}
+{"kind":"notes","id":"nt/i107q5of","slide":5,"text":""}
+{"kind":"slide","id":"sl/x8f69ofe","slide":6,"title":"数据分析","textShapes":4}
+{"kind":"textbox","id":"sh/yhg7epsj","slide":6,"name":"标题 1","placeholder":"title","text":"数据分析","textPreview":"数据分析","textChars":4,"textLines":1,"bbox":[0,0,0,0]}
+{"kind":"shape","id":"sh/98rqt4r6","slide":6,"name":"边界","bbox":[773.11,157.73,473.29,463.92]}
+{"kind":"textbox","id":"sh/xg3ylgj2","slide":6,"name":"正文","text":"2024年全年达成：139%，全年增长700%；\n初诊：全年200+ ；DOT6.2/人，跑单率11.3%","textPreview":"2024年全年达成：139%，全年增长700%； | 初诊：全年200+ ；DOT6.2/人，跑单率11.3%","textChars":53,"textLines":2,"bbox":[759.4,138.27,487,161.02]}
+{"kind":"textbox","id":"sh/7m98ru9g","slide":6,"name":"正文","text":"2025年预计全年达成100%，环比去年增长50%\n上半年初诊：200+  DOT  4.3/人，跑单率45%\n\n\n\n2025全年 非核心市场销售占比10.7%\n\n \n","textPreview":"2025年预计全年达成100%，环比去年增长50% | 上半年初诊：200+  DOT  4.3/人，跑单率45% |  |  |  | 2025全年 非核心市场销售占比10.7% |  |   |","textChars":84,"textLines":9,"bbox":[759.4,240.82,487,161.02]}
+{"kind":"textbox","id":"sh/ml07i9sv","slide":6,"name":"正文","text":"既往持续高效达成：\n核心市场的深耕及区域市场扩面\n处方客户的持续增加及DOT管理\n\n","textPreview":"既往持续高效达成： | 核心市场的深耕及区域市场扩面 | 处方客户的持续增加及DOT管理 |  |","textChars":42,"textLines":5,"bbox":[761,323.4,491.67,123.2]}
+{"kind":"chart","id":"ch/65sfup0n","slide":6,"name":"图表 43","chartType":"combo","bbox":[0,198.4,759.47,394.07]}
+{"kind":"image","id":"im/kzmlona5","slide":6,"name":"墨迹 2","bbox":[508.18,656.17,28.79,37.16]}
+{"kind":"notes","id":"nt/x8f69ofe","slide":6,"text":""}
