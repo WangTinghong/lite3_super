@@ -1,7 +1,8 @@
 """Evaluate a checkpoint, and optionally record env 0 with a status card.
 
-  python scripts/eval.py Lite3-Chase-Terrain --checkpoint <model.pt> --num-envs 256 --seconds 60
-  python scripts/eval.py Lite3-Chase-Terrain --checkpoint <model.pt> --mode both \
+  python scripts/eval_supermimic.py Lite3-Chase-Terrain --checkpoint <model.pt> \
+      --terrain stairs --terrain-all --terrain-level 4 --num-envs 256 --seconds 60
+  python scripts/eval_supermimic.py Lite3-Chase-Terrain --checkpoint <model.pt> --mode both \
       --num-envs 1 --seconds 30 --video chase_dodge.mp4
 
 Reports tags per minute, time near the chase ball, per-kind dodge hit rates with
@@ -31,6 +32,15 @@ MODE_PROBS = {"chase": (1.0, 0.0, 0.0), "dodge": (0.0, 1.0, 0.0), "both": (0.0, 
               "mixed": (0.3, 0.3, 0.4)}
 
 
+def fixed_terrain_level(env, env_ids: torch.Tensor, level: int) -> dict[str, torch.Tensor]:
+  """Keep evaluation worlds on one row, including after a fall/reset."""
+  terrain = env.scene.terrain
+  levels = torch.full((len(env_ids),), level, dtype=torch.long, device=env_ids.device)
+  terrain.terrain_levels[env_ids] = levels
+  terrain.env_origins[env_ids] = terrain.terrain_origins[levels, terrain.terrain_types[env_ids]]
+  return {"max_level": torch.tensor(float(level))}
+
+
 def main() -> None:
   ap = argparse.ArgumentParser()
   ap.add_argument("task")
@@ -43,6 +53,10 @@ def main() -> None:
                   help="Curriculum progress in [0, 1] for the targets and terrain rows (1: hardest).")
   ap.add_argument("--terrain", default=None,
                   help="Put env 0 on this terrain type (e.g. stairs, boxes; see env/terrains.py).")
+  ap.add_argument("--terrain-all", action="store_true",
+                  help="With --terrain, put every evaluation environment on that type.")
+  ap.add_argument("--terrain-level", type=int, default=None,
+                  help="Fix the terrain row across resets (0-based; 4 is hardest for the 5-row terrain).")
   ap.add_argument("--width", type=int, default=1280)
   ap.add_argument("--height", type=int, default=720)
   args = ap.parse_args()
@@ -54,13 +68,26 @@ def main() -> None:
   validate_checkpoint(ckpt)
   env_cfg = load_env_cfg(args.task, play=True)
   env_cfg.scene.num_envs = args.num_envs
+  terrain_generator = env_cfg.scene.terrain.terrain_generator
+  if args.terrain_all and not args.terrain:
+    ap.error("--terrain-all requires --terrain")
+  if (args.terrain or args.terrain_level is not None) and terrain_generator is None:
+    ap.error("--terrain and --terrain-level require a generated-terrain task")
+  if args.terrain and args.terrain not in terrain_generator.sub_terrains:
+    ap.error(f"unknown terrain {args.terrain!r}; choose from "
+             f"{', '.join(terrain_generator.sub_terrains)}")
+  if args.terrain_level is not None:
+    if not 0 <= args.terrain_level < terrain_generator.num_rows:
+      ap.error(f"--terrain-level must be 0..{terrain_generator.num_rows - 1}")
+    env_cfg.curriculum["terrain_levels"].func = fixed_terrain_level
+    env_cfg.curriculum["terrain_levels"].params = {"level": args.terrain_level}
   target_cfg = env_cfg.commands["target"]
   if args.mode:
     target_cfg.mode_probs = MODE_PROBS[args.mode]
   # Curricula run on env steps: put the step counter at the requested progress.
   steps = 10_000
   target_cfg.target.curriculum_steps = steps
-  if "terrain_levels" in env_cfg.curriculum:
+  if "terrain_levels" in env_cfg.curriculum and args.terrain_level is None:
     env_cfg.curriculum["terrain_levels"].params["steps"] = steps
   if args.video:
     env_cfg.viewer.width, env_cfg.viewer.height = args.width, args.height
@@ -78,7 +105,10 @@ def main() -> None:
                           render_mode="rgb_array" if args.video else None)
   if args.terrain:
     names = list(env_cfg.scene.terrain.terrain_generator.sub_terrains)
-    env.scene.terrain.terrain_types[0] = names.index(args.terrain)
+    if args.terrain_all:
+      env.scene.terrain.terrain_types[:] = names.index(args.terrain)
+    else:
+      env.scene.terrain.terrain_types[0] = names.index(args.terrain)
   env.common_step_counter = int(args.difficulty * steps)
   obs, _ = env.reset()
   pano = None
@@ -143,6 +173,11 @@ def main() -> None:
   minutes = args.seconds / 60.0
   chase = term.has_chase
   print(f"{args.task}  modes={target_cfg.mode_probs}  envs={n}  seconds={args.seconds}")
+  if args.terrain:
+    print(f"  terrain type               {args.terrain} "
+          f"({'all envs' if args.terrain_all else 'env 0 only'})")
+  if args.terrain_level is not None:
+    print(f"  terrain row                {args.terrain_level} (fixed across resets)")
   if chase.any():
     print(f"  chase  tags per minute     {(tags[chase].mean() / minutes).item():.1f}")
     print(f"  chase  time within {term.cfg.near_radius} m  {(near[chase].mean() / steps).item():.2f}")

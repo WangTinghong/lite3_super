@@ -45,9 +45,14 @@ ROUGH_TERRAINS = TerrainGeneratorCfg(
                                      step_width=0.4, platform_width=1.5),
     "boxes": box_random_grid(proportion=0.15, grid_width=0.45, grid_height_range=(0.02, 0.05),
                              platform_width=1.0),
-    "rough": random_rough(proportion=0.15, noise_range=(0.01, 0.04), noise_step=0.01),
-    "slope": hf_pyramid_slope(proportion=0.10, slope_range=(0.0, 0.3)),
-    "slope_inv": hf_pyramid_slope_inv(proportion=0.10, slope_range=(0.0, 0.3)),
+    # MJWarp caps contacts per heightfield/geom pair at 50. At the default
+    # 0.1 m spacing a fallen Lite3 torso can cover enough cells to overflow.
+    "rough": random_rough(proportion=0.15, noise_range=(0.01, 0.04), noise_step=0.01,
+                          horizontal_scale=0.2),
+    "slope": hf_pyramid_slope(proportion=0.10, slope_range=(0.0, 0.3),
+                              horizontal_scale=0.2),
+    "slope_inv": hf_pyramid_slope_inv(proportion=0.10, slope_range=(0.0, 0.3),
+                                      horizontal_scale=0.2),
   },
   add_lights=False,
 )

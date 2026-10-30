@@ -165,7 +165,10 @@ def test_kind_weights_steer_throws():
   cfg, gen = _gen(n, chase=False, dodge=True)
   gen.set_kind_weights(torch.tensor([0.0, 1.0, 0.0]))
   gen.respawn_dodge(torch.arange(n), torch.zeros(n, 2), torch.zeros(n))
-  assert (gen.kind == LOW_BAR).float().mean() > 0.98
+  assert (gen.kind == LOW_BAR).all()
+  gen.set_kind_weights(torch.tensor([0.0, 0.5, 0.5]))
+  gen.respawn_dodge(torch.arange(n), torch.zeros(n, 2), torch.zeros(n))
+  assert (gen.kind != BALL).all()
 
 
 def test_throws_come_from_the_chase_ball_fast_and_flat():

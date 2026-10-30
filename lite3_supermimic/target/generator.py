@@ -218,7 +218,8 @@ def _next_obstacle(robot_xy, robot_yaw, has_chase, kind_w, cfg: BallTargetCfg):
   `radius` from the chase ball, `angle` off the chase ball -> robot direction,
   at absolute height z. Without one it is an absolute point in front of the robot.
   """
-  kind = torch.multinomial(kind_w.clamp(min=1e-3), 1).squeeze(-1).float()
+  # A zero weight disables that kind (terrain training intentionally has no balls).
+  kind = torch.multinomial(kind_w.clamp(min=0.0), 1).squeeze(-1).float()
   z = torch.where(
     kind == LOW_BAR, _uniform_like(robot_yaw, cfg.low_bar_z),
     torch.where(kind == HIGH_BAR, _uniform_like(robot_yaw, cfg.high_bar_z),
