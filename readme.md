@@ -1,6 +1,6 @@
 # Lite3 SuperMimic
 
-Lite3 四足机器人的世界模型强化学习项目，参考本地 go2-supermimic 移植到 mjlab。新默认训练链路使用多步动力学学习和想象轨迹反向传播，旧 PPO／DreamWaQ／AMP 代码保留作基线。
+Lite3 四足机器人的世界模型强化学习项目，新默认训练链路使用多步动力学学习和想象轨迹反向传播，旧 PPO／DreamWaQ／AMP 代码保留作基线。
 
 完整的[两项目分析、机器人适配、安装训练及验证说明](docs/SUPERMIMIC_MIGRATION.md)。
 
