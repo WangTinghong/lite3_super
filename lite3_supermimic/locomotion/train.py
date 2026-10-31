@@ -14,7 +14,7 @@ from torch.utils.tensorboard import SummaryWriter
 from lite3_supermimic.supermimic import state as st
 from lite3_supermimic.supermimic.buffer import ReplayBuffer, WindowArchive
 from lite3_supermimic.supermimic.imagine import ImagineCfg
-from lite3_supermimic.supermimic.train import Actor, Critic, TrainCfg as BaseCfg, Trainer as BaseTrainer, lr_at
+from lite3_supermimic.supermimic.train import Actor, Critic, TrainCfg as BaseCfg, Trainer as BaseTrainer, clip_grads, lr_at
 from lite3_supermimic.supermimic.world_model import WorldModel
 from lite3_supermimic.target import terrain as tr
 from .config import (
@@ -22,7 +22,7 @@ from .config import (
     hipx_refine_weights, hipx_target_refine_weights,
 )
 from .core import TERMS, foot_clearances, validate_checkpoint
-from .amp import AMPStyle, MOTION_RATES
+from .amp import AMPStyle, MOTION_RATES, flatness_gate
 from .imagine import Imagination
 
 
@@ -40,6 +40,7 @@ class TrainCfg(BaseCfg):
     amp_batch: int = 512
     amp_updates: int = 2
     amp_lr: float = 1e-4
+    gait_anchor_weight: float = 0.0
     task: str = TASKS["flat"]
     speed_curriculum_iterations: int = 15_000
     warmup_iterations: int = 1000
@@ -60,8 +61,8 @@ class TrainCfg(BaseCfg):
         if self.hipx_target_refine and not (self.gait_refine and self.hipx_refine):
             raise ValueError("--hipx-target-refine requires --gait-refine --hipx-refine")
         if self.amp_motion_dir:
-            if self.stage != "flat" or not self.gait_refine:
-                raise ValueError("--amp-motion-dir currently requires --stage flat --gait-refine")
+            if self.stage not in ("flat", "terrain") or (self.stage == "flat" and not self.gait_refine):
+                raise ValueError("--amp-motion-dir requires flat + gait-refine or terrain")
             missing = [name for name in MOTION_RATES
                        if not (Path(self.amp_motion_dir).expanduser() / name).is_file()]
             if missing:
@@ -70,6 +71,9 @@ class TrainCfg(BaseCfg):
             raise ValueError("AMP weight/start/ramp must be nonnegative/nonnegative/positive")
         if self.amp_batch <= 0 or self.amp_updates < 0 or self.amp_lr <= 0:
             raise ValueError("AMP batch/updates/lr must be positive/nonnegative/positive")
+        if self.gait_anchor_weight < 0 or (self.gait_anchor_weight > 0 and
+                                           (self.stage != "terrain" or not self.resume)):
+            raise ValueError("--gait-anchor-weight requires a terrain run resumed from a checkpoint")
         if self.speed_curriculum_iterations <= 0:
             raise ValueError("speed_curriculum_iterations must be positive")
         if self.wm_prioritized_frac + self.wm_archive_frac > 1:
@@ -144,6 +148,8 @@ class Trainer(BaseTrainer):
         self.enc_bias = self.env.scene["robot"].data.encoder_bias.clone()
         self.wm = WorldModel(cfg.wm_hidden).to(self.dev)
         self.actor = Actor(obs_dim, cfg.actor_hidden, 12).to(self.dev)
+        self.anchor_actor = (Actor(obs_dim, cfg.actor_hidden, 12).to(self.dev)
+                             if cfg.gait_anchor_weight > 0 else None)
         self.imag = Imagination(ImagineCfg(horizon=cfg.horizon, dt=self.env.step_dt,
                                 compile=cfg.compile, sensor_grad=cfg.sensor_grad, weights=self.weights),
                                 self.consts, STAGES[cfg.stage], HISTORY, self.dev, self.field,
@@ -176,6 +182,10 @@ class Trainer(BaseTrainer):
         ckpt = torch.load(path, map_location=self.dev, weights_only=False)
         validate_checkpoint(ckpt)
         super().load(path)
+        if self.anchor_actor is not None:
+            self.anchor_actor.load_state_dict(ckpt.get("gait_anchor_actor", ckpt["actor"]))
+            self.anchor_actor.eval()
+            self.anchor_actor.requires_grad_(False)
         if self.amp is not None and "amp_style" in ckpt:
             self.amp.load_state_dict(ckpt["amp_style"])
             if "amp_optimizer" in ckpt:
@@ -264,10 +274,34 @@ class Trainer(BaseTrainer):
         if self.amp is not None:
             data["amp_style"] = self.amp.state_dict()
             data["amp_optimizer"] = self.amp.optimizer.state_dict()
+        if self.anchor_actor is not None:
+            data["gait_anchor_actor"] = self.anchor_actor.state_dict()
         temporary = path.with_suffix(".tmp")
         torch.save(data, temporary)
         temporary.replace(path)
         return path
+
+    def retain_gait(self) -> dict[str, float]:
+        """Rehearse the flat AMP actor on real, level, forward terrain states."""
+        cfg = self.cfg
+        env, slot = self.buf.sample_states(cfg.imag_batch)
+        command = self.buf.gen[env, slot, :3]
+        relief = self.buf.relief[env, slot].float()
+        keep = ((command[:, 0] >= 0.4) & (command[:, 1].abs() <= 0.15)
+                & (command[:, 2].abs() <= 0.3) & (flatness_gate(relief) > 0.5))
+        if not bool(keep.any()):
+            return {"anchor_batch": 0.0}
+        obs = self.buf.obs[env[keep], slot[keep]].float()
+        with torch.no_grad():
+            target = self.anchor_actor(obs)
+        loss = (self.actor(obs) - target).square().mean()
+        if self.it > self.actor_frozen_until:
+            self.opt_actor.zero_grad(set_to_none=True)
+            (cfg.gait_anchor_weight * loss).backward()
+            norm = clip_grads(self.actor.parameters(), cfg.grad_clip, cfg.grad_clip_elem)
+            if bool(torch.isfinite(norm)):
+                self.opt_actor.step()
+        return {"anchor_mse": float(loss.detach()), "anchor_batch": float(len(obs))}
 
     def run(self):
         cfg, started = self.cfg, time.time()
@@ -292,6 +326,8 @@ class Trainer(BaseTrainer):
                     stats["amp_scale"] = self.imag.amp_scale
                 if it > self.policy_start:
                     stats.update(self.improve_policy())
+                    if self.anchor_actor is not None:
+                        stats.update(self.retain_gait())
                     if self.amp is not None:
                         stats["amp_imagined_reward"] = self.imag.last_amp_reward
                 if it % cfg.log_interval == 0:

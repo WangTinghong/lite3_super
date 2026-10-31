@@ -6,6 +6,7 @@ import torch
 from lite3_supermimic.supermimic import state as st
 from lite3_supermimic.supermimic.imagine import Imagination as BaseImagination
 from lite3_supermimic.target import terrain as tr
+from .amp import flatness_gate
 from .core import TERMS, advance_commands, observation, reward_terms
 
 
@@ -70,6 +71,7 @@ class Imagination(BaseImagination):
                 gate = ((command[:, 0] - 0.3) / 0.2).clamp(0, 1)
                 gate = gate * (1 - command[:, 1].abs() / 0.15).clamp(0, 1)
                 gate = gate * (1 - command[:, 2].abs() / 0.3).clamp(0, 1)
+                gate = gate * flatness_gate(x[:, -tr.SCAN_POINTS:]).detach()
                 style = self.amp.reward(previous_s, s, c.default_q) * gate
                 r = r + self.amp_scale * style * cfg.dt
                 amp_rewards.append(style.detach())

@@ -76,3 +76,5 @@ python scripts/eval_locomotion.py --checkpoint "$MODEL" --stage flat \
 ```
 
 比较 FL、HR 的 HipX 摆幅与 FR、HL 的对称性，以及四腿接触相位、机身上下速度、速度误差、足端打滑和跌倒。若新策略只是让判别器奖励上升，却让这些指标或视频恶化，应降低 `--amp-weight` 或回到原检查点。当前示范只包含平地直行，本实验暂不把 AMP 奖励施加到转弯、横移及复杂地形。
+
+若转入地形训练后平地步态退化，可使用 [地形步态保留实验](TERRAIN_GAIT_RETENTION.md) 在平坦区域延续 AMP 与原策略约束。

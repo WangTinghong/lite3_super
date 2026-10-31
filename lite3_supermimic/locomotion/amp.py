@@ -19,6 +19,12 @@ MOTION_RATES = {"lite3_直行慢速.json": (1.0,),
 FEATURE_DIM = 24
 
 
+def flatness_gate(relief: torch.Tensor) -> torch.Tensor:
+    """Use flat demonstrations only where the local scan is nearly level."""
+    spread = relief.amax(-1) - relief.amin(-1)
+    return ((0.04 - spread) / 0.03).clamp(0, 1)
+
+
 def _interpolate(values: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
     lo = indices.floor().long()
     alpha = (indices - lo).unsqueeze(-1)
@@ -94,7 +100,8 @@ class AMPStyle(nn.Module):
             env, idx, valid = replay.sample_windows(4 * batch, 1)
             command = replay.gen[env, idx[:, 0], :3]
             keep = ((valid[:, 0] > 0.5) & (command[:, 0] >= 0.4)
-                    & (command[:, 1].abs() <= 0.15) & (command[:, 2].abs() <= 0.3))
+                    & (command[:, 1].abs() <= 0.15) & (command[:, 2].abs() <= 0.3)
+                    & (flatness_gate(replay.relief[env, idx[:, 0]].float()) > 0.5))
             selected = keep.nonzero().flatten()
             if len(selected) == 0:
                 continue
