@@ -38,6 +38,7 @@ class Rewards:
     diagonal_contact: float = 0.0
     all_airborne: float = 0.0
     hipx_swing_outward: float = 0.0
+    hipx_target_outward: float = 0.0
     action_rate: float = -0.02
     joint_limits: float = -1.0
     joint_torques: float = -2e-5
@@ -60,3 +61,8 @@ def gait_refine_weights() -> Rewards:
 def hipx_refine_weights() -> Rewards:
     """Keep diagonal timing while discouraging excessive outward swing."""
     return replace(gait_refine_weights(), hipx_swing_outward=-4.0)
+
+
+def hipx_target_refine_weights() -> Rewards:
+    """Also train the policy's own target angles, with a direct actor gradient."""
+    return replace(hipx_refine_weights(), hipx_target_outward=-10.0)

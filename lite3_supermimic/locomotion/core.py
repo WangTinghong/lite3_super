@@ -78,8 +78,11 @@ def reward_terms(s0, s1, p0, p1, a, prev, command, c, dt, field=None):
     # Every HipX axis points toward -x, so negative angles on the left and
     # positive angles on the right move the leg outward.
     hipx_outward = q[:, 0::3] * q.new_tensor([-1, 1, -1, 1])
+    target_q = c.default_q + a * c.action_scale
+    target_hipx_outward = target_q[:, 0::3] * q.new_tensor([-1, 1, -1, 1])
     swing = 1 - contact[:, [1, 0, 3, 2]]
     hipx_swing_outward = (hipx_outward - 0.25).clamp(min=0).square() * swing
+    hipx_target_outward = (target_hipx_outward - 0.25).clamp(min=0).square() * swing
     relief = tr.relief(p1[:, :2], p1[:, 2], field)
     rough = (relief.amax(-1) - relief.amin(-1)).clamp(0, 0.12)
     desired_clearance = 0.04 + rough[:, None] * 0.5
@@ -93,6 +96,7 @@ def reward_terms(s0, s1, p0, p1, a, prev, command, c, dt, field=None):
         "diagonal_contact": gait_gate * diagonal_mismatch,
         "all_airborne": gait_gate * flight,
         "hipx_swing_outward": gait_gate * hipx_swing_outward.sum(-1),
+        "hipx_target_outward": gait_gate * hipx_target_outward.sum(-1),
         "action_rate": (a - prev).square().sum(-1),
         "joint_limits": ((c.soft_limits[..., 0] - q).clamp(min=0)
                          + (q - c.soft_limits[..., 1]).clamp(min=0)).sum(-1),

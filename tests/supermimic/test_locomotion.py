@@ -5,7 +5,8 @@ import pytest
 import torch
 
 from lite3_supermimic.locomotion.config import (
-    HISTORY, SCHEMA, STAGES, TASKS, WEIGHTS, gait_refine_weights, hipx_refine_weights,
+    HISTORY, SCHEMA, STAGES, TASKS, WEIGHTS, gait_refine_weights,
+    hipx_refine_weights, hipx_target_refine_weights,
 )
 from lite3_supermimic.locomotion.core import (
     TERMS, advance_commands, feet_world, foot_clearances, observation, reward_terms,
@@ -108,6 +109,24 @@ def test_hipx_refinement_penalizes_outward_swing_only_for_straight_motion():
     assert state.grad[0, st.Q.start + 9] > 0
     assert WEIGHTS.hipx_swing_outward == gait_refine_weights().hipx_swing_outward == 0
     assert hipx_refine_weights().hipx_swing_outward < 0
+
+
+def test_hipx_target_refinement_has_direct_action_gradient():
+    s, p, a, c = inputs(3)
+    feet = s[:, st.FEET].reshape(3, 4, 3)
+    feet[:2, [1, 2], 2] += 0.10  # FL and HR swing; row 2 stands.
+    a[0, 0], a[0, 9] = -1.6, 1.6  # Target angles -0.4 and +0.4 rad.
+    a[1, 0], a[1, 9] = 1.6, -1.6  # Same magnitude, inward.
+    a[2, 0], a[2, 9] = -1.6, 1.6
+    action = a.clone().requires_grad_()
+    cmd = torch.tensor([[1., 0., 0.]]).expand(3, 3)
+    penalty = reward_terms(s, s, p, p, action, a, cmd, c, .02)["hipx_target_outward"]
+    assert penalty[0] > penalty[2] > penalty[1] == 0
+    penalty[0].backward()
+    assert action.grad[0, 0] < 0
+    assert action.grad[0, 9] > 0
+    assert WEIGHTS.hipx_target_outward == hipx_refine_weights().hipx_target_outward == 0
+    assert hipx_target_refine_weights().hipx_target_outward < 0
 
 
 def test_observation_history_has_no_target_slot():
