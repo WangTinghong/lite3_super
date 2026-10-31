@@ -1,5 +1,7 @@
 # Lite3 SuperMimic
 
+新增独立的速度指令运动控制实验：平地、多地形、高速平地、联合适应四阶段，见 [运动控制训练与评估](docs/LOCOMOTION.md)。入口为 `scripts/train_locomotion.py`，日志为 `logs/lite3_locomotion`。原追逐/躲避入口保持兼容；新旧检查点不可混用。四阶段运动能力尚待 GPU 训练和评估验证。
+
 Lite3 四足机器人的世界模型强化学习项目，新默认训练链路使用多步动力学学习和想象轨迹反向传播，旧 PPO／DreamWaQ／AMP 代码保留作基线。
 
 完整的[两项目分析、机器人适配、安装训练及验证说明](docs/SUPERMIMIC_MIGRATION.md)。

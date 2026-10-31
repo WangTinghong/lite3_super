@@ -1,0 +1,280 @@
+"""Independent locomotion entry point, reusing SuperMimic replay/WM/BPTT optimisers."""
+from __future__ import annotations
+
+import argparse
+from collections import defaultdict
+from dataclasses import asdict, dataclass
+from datetime import datetime
+from pathlib import Path
+import time
+
+import torch
+from torch.utils.tensorboard import SummaryWriter
+
+from lite3_supermimic.supermimic import state as st
+from lite3_supermimic.supermimic.buffer import ReplayBuffer, WindowArchive
+from lite3_supermimic.supermimic.imagine import ImagineCfg
+from lite3_supermimic.supermimic.train import Actor, Critic, TrainCfg as BaseCfg, Trainer as BaseTrainer, lr_at
+from lite3_supermimic.supermimic.world_model import WorldModel
+from lite3_supermimic.target import terrain as tr
+from .config import HISTORY, SCHEMA, STAGES, TASKS, WEIGHTS
+from .core import TERMS, foot_clearances, validate_checkpoint
+from .imagine import Imagination
+
+
+@dataclass(kw_only=True)
+class TrainCfg(BaseCfg):
+    device: str = "cuda:0"
+    stage: str = "flat"
+    task: str = TASKS["flat"]
+    speed_curriculum_iterations: int = 15_000
+    warmup_iterations: int = 1000
+    wm_updates: int = 4
+    actor_lr_scale: float = 0.3
+    dodge_shaping: float = 0.0
+    run_name: str = ""
+    log_root: str = "logs/lite3_locomotion"
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.stage not in STAGES:
+            raise ValueError(f"stage must be one of {tuple(STAGES)}")
+        if self.speed_curriculum_iterations <= 0:
+            raise ValueError("speed_curriculum_iterations must be positive")
+        if self.wm_prioritized_frac + self.wm_archive_frac > 1:
+            raise ValueError("world-model sampling fractions must sum to <= 1")
+        if self.driver_policy or self.expert_policy:
+            raise ValueError("Locomotion uses --resume from a locomotion checkpoint, not chase experts")
+        self.task = TASKS[self.stage]
+        self.run_name = self.run_name or f"lite3_locomotion_{self.stage}"
+
+
+class Trainer(BaseTrainer):
+    def __init__(self, cfg):
+        from . import env as registration  # noqa: F401
+        from mjlab.envs import ManagerBasedRlEnv
+        from mjlab.tasks.registry import load_env_cfg
+
+        if cfg.device.startswith("cuda") and not torch.cuda.is_available():
+            raise RuntimeError("Locomotion training requires an NVIDIA CUDA GPU")
+        # Validate before constructing expensive terrain or allocating GPU buffers.
+        if cfg.resume:
+            checkpoint = torch.load(cfg.resume, map_location="cpu", weights_only=False)
+            validate_checkpoint(checkpoint)
+            changed_stage = checkpoint["cfg"]["stage"] != cfg.stage
+            if cfg.continue_run and changed_stage:
+                raise ValueError("--continue-run requires the same stage; omit it for stage transfer")
+            if changed_stage:
+                cfg.reset_critic = True
+        self.cfg = cfg
+        torch.manual_seed(cfg.seed)
+        env_cfg = load_env_cfg(cfg.task)
+        env_cfg.scene.num_envs, env_cfg.seed = cfg.num_envs, cfg.seed
+        env_cfg.commands["velocity"].curriculum_steps = cfg.speed_curriculum_iterations * cfg.collect_steps
+        self.env_cfg = env_cfg
+        self.env = ManagerBasedRlEnv(cfg=env_cfg, device=cfg.device)
+        self.dev = self.env.device
+        self.term = self.env.command_manager.get_term("velocity")
+        self.field = self.term.height_field
+        self.history, self.terms = HISTORY, TERMS
+        from lite3_supermimic.robot.constants import JOINT_NAMES
+        if tuple(self.env.scene["robot"].joint_names) != JOINT_NAMES:
+            raise ValueError("Unexpected Lite3 joint order")
+        obs, _ = self.env.reset()
+        self.obs = obs["actor"]
+        obs_dim = HISTORY * sum(d for _, d in TERMS)
+        if self.obs.shape[-1] != obs_dim:
+            raise ValueError("Locomotion observation dimension mismatch")
+        self.consts = st.robot_consts(self.env)
+        self.ctx = st.ContextReader(self.env)
+        # Startup COM randomisation has already run. Its reference must be the
+        # original MuJoCo model, not each world's already-randomised COM.
+        base_id = int(self.ctx.base_body)
+        self.ctx.base_ipos0 = torch.as_tensor(self.env.sim.mj_model.body_ipos[base_id].copy(),
+                                            dtype=torch.float32, device=self.dev).expand(cfg.num_envs, 3)
+        self.xi = self.ctx.read()
+        self.enc_bias = self.env.scene["robot"].data.encoder_bias.clone()
+        self.wm = WorldModel(cfg.wm_hidden).to(self.dev)
+        self.actor = Actor(obs_dim, cfg.actor_hidden, 12).to(self.dev)
+        self.imag = Imagination(ImagineCfg(horizon=cfg.horizon, dt=self.env.step_dt,
+                                compile=cfg.compile, sensor_grad=cfg.sensor_grad, weights=WEIGHTS),
+                                self.consts, STAGES[cfg.stage], HISTORY, self.dev, self.field)
+        self.critic = Critic(self.imag.critic_dim, cfg.critic_hidden).to(self.dev)
+        self.opt_wm = torch.optim.Adam(self.wm.parameters(), lr=cfg.lr)
+        self.opt_actor = torch.optim.Adam(self.actor.parameters(), lr=cfg.lr, betas=(0.9, 0.95))
+        self.opt_critic = torch.optim.Adam(self.critic.parameters(), lr=cfg.lr)
+        self.buf = ReplayBuffer(cfg.num_envs, cfg.buffer_len, obs_dim, self.dev, gen_dim=5)
+        self.archive = WindowArchive(cfg.archive_size, cfg.wm_window, st.CONTEXT_DIM, self.dev)
+        self.explore = torch.arange(cfg.num_envs, device=self.dev) < int(cfg.explore_frac * cfg.num_envs)
+        self.ou = torch.zeros(cfg.num_envs, 12, device=self.dev)
+        self.a_prev = torch.zeros_like(self.ou)
+        self.ep_stats = defaultdict(list)
+        self.env_steps = 0
+        self.actor_frozen_until = 0
+        self.policy_start = cfg.warmup_iterations
+        self.lr_scale, self.ramp_start = 1.0, 0
+        self.nonfinite_steps, self.start_it = 0, 0
+        self.last_ckpt = None
+        self.window_falls, self.window_steps = 0, 0
+        stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")
+        self.log_dir = Path(cfg.log_root) / f"{stamp}_{cfg.run_name}"
+        self.log_dir.mkdir(parents=True, exist_ok=False)
+        self.writer = SummaryWriter(str(self.log_dir))
+        if cfg.resume:
+            self.load(cfg.resume)
+
+    def load(self, path):
+        ckpt = torch.load(path, map_location=self.dev, weights_only=False)
+        validate_checkpoint(ckpt)
+        super().load(path)
+        if self.cfg.continue_run:
+            self.env.common_step_counter = ckpt.get("command_steps", self.start_it * self.cfg.collect_steps)
+            self.env_steps = ckpt.get("env_steps", 0)
+            # Replay is not checkpointed: refill and rewarm on restart.
+            self.policy_start = self.start_it + self.cfg.warmup_iterations
+            self.actor_frozen_until = max(self.actor_frozen_until, self.policy_start)
+            levels = ckpt.get("terrain_levels")
+            if self.field is not None and levels is not None:
+                terrain = self.env.scene.terrain
+                if len(levels) == self.cfg.num_envs:
+                    terrain.terrain_levels[:] = levels.to(self.dev)
+                    terrain.env_origins[:] = terrain.terrain_origins[
+                        terrain.terrain_levels, terrain.terrain_types]
+            # New command/observation must reflect the restored schedule and origins.
+            self.obs = self.env.reset()[0]["actor"]
+
+    @torch.no_grad()
+    def collect(self):
+        env, cfg = self.env, self.cfg
+        for _ in range(cfg.collect_steps):
+            s, pose = st.robot_state(env, self.field), st.planar_pose(env)
+            packed = self.term.packed().clone()
+            relief = self._relief(pose)
+            a = self.actor(self.obs)
+            dt = env.step_dt
+            self.ou = (self.ou * (1 - cfg.explore_theta * dt)
+                       + cfg.explore_noise * (2 * cfg.explore_theta * dt)**0.5 * torch.randn_like(a))
+            a = a + torch.where(self.explore[:, None], self.ou, cfg.action_noise * torch.randn_like(a))
+            obs, _, terminated, truncated, extras = env.step(a)
+            done = terminated | truncated
+            self.buf.add(s, pose, a, self.a_prev, self.obs, packed, done, relief)
+            keep = ~done
+            if keep.any():
+                s1 = st.robot_state(env, self.field)
+                dp = st.pose_delta(pose, st.planar_pose(env))
+                self.wm.update_stats(s[keep], a[keep], self.a_prev[keep], self.xi[keep],
+                                     relief[keep], s1[keep], dp[keep])
+                self.ep_stats["locomotion/linear_error_mps"].append(
+                    float((s1[keep, 4:6] - packed[keep, :2]).norm(dim=-1).mean()))
+                self.ep_stats["locomotion/yaw_error_radps"].append(
+                    float((s1[keep, 9] - packed[keep, 2]).abs().mean()))
+                self.ep_stats["locomotion/speed_mps"].append(float(s1[keep, 4:6].norm(dim=-1).mean()))
+            self.actor.norm.update(self.obs)
+            self.window_falls += int(terminated.sum())
+            self.window_steps += env.num_envs
+            self.ou[done] = 0
+            self.a_prev = torch.where(done[:, None], torch.zeros_like(a), a)
+            self.obs = obs["actor"]
+            self.env_steps += env.num_envs
+            for key, val in extras.get("log", {}).items():
+                self.ep_stats[key].append(float(val))
+
+    def _relief(self, pose):
+        return tr.relief(pose[:, :2], pose[:, 2], self.field)
+
+    def _window_contacts(self, w):
+        s, p = w["s"], w["pose"]
+        return (foot_clearances(s.reshape(-1, st.STATE_DIM), p.reshape(-1, 3), self.field)
+                .reshape(*s.shape[:2], 4) < 0.015)
+
+    def _rarity(self, w):
+        contact = self._window_contacts(w).float()
+        return ((contact[:, 1:] - contact[:, :-1]).abs().sum((1, 2))
+                + (contact.sum(-1) == 0).float().sum(-1)
+                + 4 * (w["valid"][:, -1] < 0.5).float())
+
+    def _archive_worthy(self, w):
+        flight = (~self._window_contacts(w).any(-1)).sum(-1) >= 2
+        return flight | (w["s"][:, :, 6].abs().amax(-1) > 0.6) | (w["valid"][:, -1] < 0.5)
+
+    def save(self, it):
+        path = self.log_dir / f"model_{it}.pt"
+        terrain = self.env.scene.terrain
+        data = dict(supermimic=True, robot="lite3", task_family=SCHEMA,
+                    joint_names=list(self.env.scene["robot"].joint_names), iteration=it,
+                    cfg=asdict(self.cfg), obs_terms=TERMS, history=HISTORY, obs_dim=self.obs.shape[-1],
+                    actor=self.actor.state_dict(), critic=self.critic.state_dict(),
+                    world_model=self.wm.state_dict(), opt_wm=self.opt_wm.state_dict(),
+                    opt_actor=self.opt_actor.state_dict(), opt_critic=self.opt_critic.state_dict(),
+                    env_steps=self.env_steps, command_steps=self.env.common_step_counter,
+                    terrain_levels=terrain.terrain_levels if self.field is not None else None)
+        temporary = path.with_suffix(".tmp")
+        torch.save(data, temporary)
+        temporary.replace(path)
+        return path
+
+    def run(self):
+        cfg, started = self.cfg, time.time()
+        try:
+            while self.buf.size <= cfg.wm_window + 1:
+                self.collect()
+            for it in range(self.start_it + 1, cfg.iterations + 1):
+                self.it = it
+                start = max(self.actor_frozen_until, self.policy_start)
+                ramp = min(1.0, max(0, it - start) / max(1, cfg.actor_ramp_iterations))
+                for opt, scale in ((self.opt_wm, 1), (self.opt_actor, ramp * cfg.actor_lr_scale),
+                                   (self.opt_critic, 1)):
+                    for group in opt.param_groups:
+                        group["lr"] = lr_at(cfg, it) * scale
+                self.collect()
+                stats = {"wm_loss": self.fit_world_model()}
+                if it > self.policy_start:
+                    stats.update(self.improve_policy())
+                if it % cfg.log_interval == 0:
+                    mins = (time.time() - started) / 60
+                    fall_rate = self.window_falls / max(1, self.window_steps) / self.env.step_dt * 60
+                    line = [f"it {it}/{cfg.iterations}", f"{mins:.1f} min", f"falls/min {fall_rate:.3g}"]
+                    for key, val in stats.items():
+                        self.writer.add_scalar(f"train/{key}", val, it)
+                        line.append(f"{key} {val:.4g}")
+                    for key, vals in self.ep_stats.items():
+                        val = sum(vals) / len(vals)
+                        self.writer.add_scalar(key, val, it)
+                        if key.startswith("locomotion/"):
+                            line.append(f"{key.split('/')[-1]} {val:.3g}")
+                    self.writer.add_scalar("locomotion/falls_per_minute", fall_rate, it)
+                    self.writer.add_scalar("train/nonfinite_skipped", self.nonfinite_steps, it)
+                    self.writer.add_scalar("time/minutes", mins, it)
+                    self.writer.add_scalar("steps/environment", self.env_steps, it)
+                    self.ep_stats.clear()
+                    self.window_falls, self.window_steps = 0, 0
+                    print(" | ".join(line), flush=True)
+                if it % cfg.save_interval == 0 or it == cfg.iterations:
+                    self.last_ckpt = self.save(it)
+                    print(f"saved {self.last_ckpt}", flush=True)
+        finally:
+            self.writer.close()
+            self.env.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    defaults = asdict(TrainCfg())
+    hidden = {"task", "terrain_curriculum_iterations", "target_curriculum_iterations",
+              "collapse_falls", "expert_policy", "expert_frac"}
+    for name, value in defaults.items():
+        if name in hidden or name.startswith(("driver_", "dodge_")):
+            continue
+        kwargs = {"default": value}
+        if isinstance(value, bool):
+            kwargs["action"] = argparse.BooleanOptionalAction
+        elif isinstance(value, tuple):
+            kwargs.update(type=int, nargs="+")
+        else:
+            kwargs["type"] = type(value)
+        if name == "stage":
+            kwargs["choices"] = tuple(STAGES)
+        parser.add_argument("--" + name.replace("_", "-"), **kwargs)
+    opts = vars(parser.parse_args())
+    cfg = TrainCfg(**{k: tuple(v) if isinstance(v, list) else v for k, v in opts.items()})
+    Trainer(cfg).run()

@@ -1,0 +1,206 @@
+"""Locomotion semantics plus regression protection for the existing Chase tasks."""
+from types import SimpleNamespace
+
+import pytest
+import torch
+
+from lite3_supermimic.locomotion.config import HISTORY, SCHEMA, STAGES, TASKS, WEIGHTS
+from lite3_supermimic.locomotion.core import (
+    TERMS, advance_commands, feet_world, foot_clearances, observation, reward_terms,
+    sample_commands, validate_checkpoint,
+)
+from lite3_supermimic.supermimic import state as st
+from lite3_supermimic.robot.constants import JOINT_NAMES
+from lite3_supermimic.target.terrain import HeightField
+
+
+def inputs(n=4):
+    s = torch.zeros(n, st.STATE_DIM)
+    s[:, 0], s[:, 3] = 0.28, -1
+    s[:, st.FEET] = torch.tensor([0.2, -0.1, -0.258, 0.2, 0.1, -0.258,
+                                 -0.2, -0.1, -0.258, -0.2, 0.1, -0.258])
+    pose = torch.zeros(n, 3)
+    a = torch.zeros(n, 12)
+    c = st.RobotConsts(default_q=a.clone(), action_scale=torch.full_like(a, 0.25),
+                       kp=torch.full((12,), 20.), kd=torch.full((12,), .7),
+                       effort=torch.full((12,), 30.), soft_limits=torch.tensor([-2., 2.]).expand(n, 12, 2))
+    return s, pose, a, c
+
+
+def test_commands_resample_on_expiry_and_hold_otherwise():
+    torch.manual_seed(5)
+    stage = STAGES["fast"]
+    packed = torch.tensor([[0.7, 0.1, 0.2, 0.01, 2.0], [0.7, 0.1, 0.2, 2., 2.]])
+    nxt = advance_commands(packed, .02, stage)
+    torch.testing.assert_close(nxt[1, :3], packed[1, :3])
+    assert nxt[1, 3] == pytest.approx(1.98)
+    assert stage.interval[0] <= nxt[0, 3] <= stage.interval[1]
+    assert not torch.equal(nxt[0, :3], packed[0, :3])
+    commands = sample_commands(10_000, torch.full((10_000,), 2.), stage)
+    assert commands[:, 0].min() >= stage.backward and commands[:, 0].max() <= 2
+    assert commands[:, 1].abs().max() <= stage.lateral
+    assert commands[:, 2].abs().max() <= stage.yaw
+    assert 0.1 < float((commands == 0).all(-1).float().mean()) < 0.3
+
+
+def test_contact_clearance_uses_each_foot_local_ground():
+    s, p, _, _ = inputs(1)
+    # z = x + 1, base ground is 1; front/rear feet sit over different ground.
+    x = torch.linspace(-1, 1, 21)
+    field = HeightField((x + 1).expand(21, 21).clone(), (-1., -1.), .1)
+    feet = feet_world(s, p, field)
+    torch.testing.assert_close(feet[..., 2], torch.full((1, 4), 1.022))
+    torch.testing.assert_close(foot_clearances(s, p, field), torch.tensor([[-.2, -.2, .2, .2]]), atol=1e-6, rtol=0)
+    # Translating the entire ground vertically must not change local rewards.
+    shifted = HeightField(field.h + 4, field.origin, field.res)
+    torch.testing.assert_close(foot_clearances(s, p, field), foot_clearances(s, p, shifted), atol=1e-6, rtol=0)
+
+
+def test_tracking_reward_prefers_command_matching_and_standing():
+    s, p, a, c = inputs()
+    cmd = torch.tensor([[1., 0., .5]]).expand(4, 3)
+    matched = s.clone()
+    matched[:, 4], matched[:, 9] = 1., .5
+    r0 = reward_terms(s, s, p, p, a, a, cmd, c, .02)
+    r1 = reward_terms(s, matched, p, p, a, a, cmd, c, .02)
+    assert torch.all(r1["track_linear"] > r0["track_linear"])
+    assert torch.all(r1["track_yaw"] > r0["track_yaw"])
+    assert set(r1) == set(vars(WEIGHTS)) - {"terminated"}
+    assert all(torch.isfinite(v).all() for v in r1.values())
+
+
+def test_observation_history_has_no_target_slot():
+    s, p, a, _ = inputs()
+    scan = torch.zeros(4, 77)
+    cmd = torch.randn(4, 3)
+    frame = observation(s, a, cmd, a, scan)
+    assert tuple(frame) == tuple(k for k, _ in TERMS)
+    assert "target" not in frame
+    assert HISTORY * sum(d for _, d in TERMS) == 610
+    hist = torch.zeros(4, 610)
+    for _ in range(HISTORY):
+        hist = st.push_history(hist, frame, HISTORY, TERMS)
+    start = 42 * HISTORY
+    torch.testing.assert_close(hist[:, start:start + 15], cmd.repeat(1, HISTORY))
+
+
+def test_task_family_rejects_chase_even_if_dimensions_match():
+    ckpt = dict(robot="lite3", joint_names=JOINT_NAMES, obs_terms=TERMS, history=HISTORY)
+    with pytest.raises(ValueError, match="chase/PPO"):
+        validate_checkpoint(ckpt)
+    validate_checkpoint(dict(ckpt, task_family=SCHEMA))
+    with pytest.raises(ValueError, match="schema/history"):
+        validate_checkpoint(dict(ckpt, task_family=SCHEMA, history=1))
+
+
+def test_imagined_policy_update_and_stage_weight_transfer():
+    from lite3_supermimic.locomotion.imagine import Imagination
+    from lite3_supermimic.supermimic.imagine import ImagineCfg
+    from lite3_supermimic.supermimic.train import Actor, Critic
+    from lite3_supermimic.supermimic.world_model import WorldModel
+    s, p, a, c = inputs()
+    actor = Actor(610, (32, 32), 12)
+    wm = WorldModel((32, 32))
+    for param in wm.net.parameters():
+        param.data.mul_(.01)
+    wm.requires_grad_(False)
+    for stage in STAGES.values():
+        imag = Imagination(ImagineCfg(horizon=3, weights=WEIGHTS), c, stage, HISTORY, "cpu")
+        critic = Critic(imag.critic_dim, (32, 32)).requires_grad_(False)
+        seed = dict(s=s, pose=p, a_prev=a, obs=torch.zeros(4, 610), env=torch.arange(4),
+                    gen=torch.tensor([[1., 0., 0., 2., 2.]]).expand(4, 5),
+                    xi=torch.zeros(4, 4), enc_bias=a)
+        actor.zero_grad(set_to_none=True)
+        ret, data = imag.rollout(wm, actor, critic, seed)
+        (-ret.mean()).backward()
+        grads = [param.grad for param in actor.parameters() if param.grad is not None]
+        assert all(torch.isfinite(g).all() for g in grads)
+        assert sum(g.abs().sum() for g in grads) > 0
+        assert torch.isfinite(imag.gae_targets(critic, data)).all()
+        clone = Actor(610, (32, 32), 12)
+        clone.load_state_dict(actor.state_dict())
+        torch.testing.assert_close(actor(seed["obs"]), clone(seed["obs"]))
+
+
+def test_all_task_configs_preserve_chase_and_share_locomotion_schema():
+    pytest.importorskip("mjlab")
+    from lite3_supermimic.locomotion.env import make_env_cfg
+    from mjlab.tasks.registry import load_env_cfg
+    for stage in STAGES:
+        cfg = make_env_cfg(stage)
+        assert list(cfg.commands) == ["velocity"]
+        assert tuple(cfg.observations["actor"].terms) == tuple(k for k, _ in TERMS)
+        assert cfg.observations["actor"].history_length == HISTORY
+        assert cfg.actions["joint_pos"].scale == {".*_joint": .25}
+        assert cfg.decimation * cfg.sim.mujoco.timestep == .02
+        assert "chase_tag" not in cfg.rewards
+        assert load_env_cfg(TASKS[stage]).commands["velocity"].stage == stage
+    for task, dim in (("Lite3-Chase-Flat", 350), ("Lite3-Chase-Obstacles", 430), ("Lite3-Chase-Terrain", 735)):
+        cfg = load_env_cfg(task)
+        assert list(cfg.commands) == ["target"]
+        assert "chase_tag" in cfg.rewards and "hit" in cfg.rewards
+        assert sum(d for _, d in st.obs_terms(cfg)) * 5 == dim
+
+
+def test_fixed_terrain_level_survives_reset_and_curriculum_uses_performance():
+    pytest.importorskip("mjlab")
+    from lite3_supermimic.locomotion.env import terrain_curriculum
+    terrain = SimpleNamespace(terrain_levels=torch.tensor([1, 1]), terrain_types=torch.tensor([0, 0]),
+                               terrain_origins=torch.randn(5, 1, 3), env_origins=torch.zeros(2, 3))
+    term = SimpleNamespace(cfg=SimpleNamespace(fixed_level=None), count=torch.tensor([100., 100.]),
+                           error_sum=torch.tensor([10., 100.]), distance=torch.tensor([4., 4.]))
+    env = SimpleNamespace(scene=SimpleNamespace(terrain=terrain),
+                           command_manager=SimpleNamespace(get_term=lambda _: term),
+                           termination_manager=SimpleNamespace(terminated=torch.tensor([False, True])))
+    ids = torch.arange(2)
+    terrain_curriculum(env, ids)
+    assert terrain.terrain_levels.tolist() == [2, 0]
+    term.cfg.fixed_level = 4
+    for _ in range(3):
+        terrain_curriculum(env, ids)
+        assert terrain.terrain_levels.tolist() == [4, 4]
+        torch.testing.assert_close(terrain.env_origins, terrain.terrain_origins[4, 0].expand(2, 3))
+
+
+def test_gait_metrics_exclude_reset_teleports_and_use_real_elapsed_time():
+    from lite3_supermimic.locomotion.metrics import Metrics
+    s, p, a, _ = inputs(2)
+    metric = Metrics(2, "cpu")
+    contact = torch.ones(2, 4, dtype=torch.bool)
+    no = torch.zeros(2, dtype=torch.bool)
+    metric.update(s, p, s, p, torch.zeros(2, 3), a, a, contact, torch.zeros(2, 4, 3), no, no, .02)
+    assert metric.touchdowns.sum() == 0
+    metric.update(s, p, s, p, torch.zeros(2, 3), a, a, contact, torch.zeros(2, 4, 3), ~no, no, .02)
+    result = metric.result()
+    assert result["falls"] == 2 and result["completed_episodes"] == 2
+    assert result["falls_per_robot_minute"] == pytest.approx(1500.)
+    assert result["stance_slip_rms_mps"] == 0
+    assert result["nonfall_completion_fraction"] == 0
+    assert metric.has_touch.sum() == 0
+
+
+def test_contact_metrics_reorder_xml_feet_to_state_order():
+    from lite3_supermimic.locomotion.metrics import read_contacts
+    sensor = SimpleNamespace(
+        primary_names=[f"robot/{leg}_FOOT_collision" for leg in ("FL", "FR", "HL", "HR")],
+        data=SimpleNamespace(found=torch.tensor([[1, 0, 1, 0]]),
+                             force=torch.arange(12).float().reshape(1, 4, 3)))
+    contact, force = read_contacts(sensor)
+    assert contact.tolist() == [[False, True, False, True]]
+    torch.testing.assert_close(force, sensor.data.force[:, [1, 0, 3, 2]])
+
+
+def test_locomotion_collision_exposes_foot_without_modifying_shared_xml():
+    mujoco = pytest.importorskip("mujoco")
+    from lite3_supermimic.locomotion.env import make_env_cfg
+    from lite3_supermimic.robot.lite3 import get_spec
+    original = get_spec()
+    specific = make_env_cfg("flat").scene.entities["robot"].spec_fn()
+    for leg in ("FR", "FL", "HR", "HL"):
+        old = original.geom(f"{leg}_SHANK_collision")
+        new = specific.geom(f"{leg}_SHANK_collision")
+        foot = specific.geom(f"{leg}_FOOT_collision")
+        assert old.fromto[5] == pytest.approx(-.21012)
+        assert new.fromto[5] == pytest.approx(-.18012)
+        assert foot.size[0] == pytest.approx(.022)
+    specific.compile()
