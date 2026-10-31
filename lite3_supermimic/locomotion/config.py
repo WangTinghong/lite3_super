@@ -37,6 +37,7 @@ class Rewards:
     vertical_velocity: float = -0.1
     diagonal_contact: float = 0.0
     all_airborne: float = 0.0
+    hipx_swing_outward: float = 0.0
     action_rate: float = -0.02
     joint_limits: float = -1.0
     joint_torques: float = -2e-5
@@ -54,3 +55,8 @@ def gait_refine_weights() -> Rewards:
     """Flat-ground, moderate-speed experiment; original task keeps WEIGHTS."""
     return replace(WEIGHTS, vertical_velocity=-0.8,
                    diagonal_contact=-1.5, all_airborne=-0.8)
+
+
+def hipx_refine_weights() -> Rewards:
+    """Keep diagonal timing while discouraging excessive outward swing."""
+    return replace(gait_refine_weights(), hipx_swing_outward=-4.0)

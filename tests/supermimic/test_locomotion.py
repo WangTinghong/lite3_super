@@ -4,7 +4,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lite3_supermimic.locomotion.config import HISTORY, SCHEMA, STAGES, TASKS, WEIGHTS, gait_refine_weights
+from lite3_supermimic.locomotion.config import (
+    HISTORY, SCHEMA, STAGES, TASKS, WEIGHTS, gait_refine_weights, hipx_refine_weights,
+)
 from lite3_supermimic.locomotion.core import (
     TERMS, advance_commands, feet_world, foot_clearances, observation, reward_terms,
     sample_commands, validate_checkpoint,
@@ -86,6 +88,26 @@ def test_optional_gait_reward_distinguishes_diagonal_stance_from_hopping():
     assert WEIGHTS.diagonal_contact == WEIGHTS.all_airborne == 0
     assert gait_refine_weights().diagonal_contact < 0
     assert gait_refine_weights().all_airborne < 0
+
+
+def test_hipx_refinement_penalizes_outward_swing_only_for_straight_motion():
+    s, p, a, c = inputs(4)
+    # Joint order: FL, FR, HL, HR. Negative FL and positive HR swing outward.
+    s[[0, 2, 3], st.Q.start] = -0.4
+    s[[0, 2, 3], st.Q.start + 9] = 0.4
+    s[1, st.Q.start], s[1, st.Q.start + 9] = 0.4, -0.4
+    feet = s[:, st.FEET].reshape(4, 4, 3)
+    feet[:3, [1, 2], 2] += 0.10  # FL and HR in swing; row 3 stays in stance.
+    cmd = torch.tensor([[1., 0., 0.], [1., 0., 0.],
+                        [1., 0., 0.6], [1., 0., 0.]])
+    state = s.clone().requires_grad_()
+    penalty = reward_terms(s, state, p, p, a, a, cmd, c, .02)["hipx_swing_outward"]
+    assert penalty[0] > penalty[3] > penalty[1] == penalty[2] == 0
+    penalty[0].backward()
+    assert state.grad[0, st.Q.start] < 0
+    assert state.grad[0, st.Q.start + 9] > 0
+    assert WEIGHTS.hipx_swing_outward == gait_refine_weights().hipx_swing_outward == 0
+    assert hipx_refine_weights().hipx_swing_outward < 0
 
 
 def test_observation_history_has_no_target_slot():

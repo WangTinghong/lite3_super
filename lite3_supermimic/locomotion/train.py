@@ -17,7 +17,7 @@ from lite3_supermimic.supermimic.imagine import ImagineCfg
 from lite3_supermimic.supermimic.train import Actor, Critic, TrainCfg as BaseCfg, Trainer as BaseTrainer, lr_at
 from lite3_supermimic.supermimic.world_model import WorldModel
 from lite3_supermimic.target import terrain as tr
-from .config import HISTORY, SCHEMA, STAGES, TASKS, WEIGHTS, gait_refine_weights
+from .config import HISTORY, SCHEMA, STAGES, TASKS, WEIGHTS, gait_refine_weights, hipx_refine_weights
 from .core import TERMS, foot_clearances, validate_checkpoint
 from .imagine import Imagination
 
@@ -27,6 +27,7 @@ class TrainCfg(BaseCfg):
     device: str = "cuda:0"
     stage: str = "flat"
     gait_refine: bool = False
+    hipx_refine: bool = False
     task: str = TASKS["flat"]
     speed_curriculum_iterations: int = 15_000
     warmup_iterations: int = 1000
@@ -42,6 +43,8 @@ class TrainCfg(BaseCfg):
             raise ValueError(f"stage must be one of {tuple(STAGES)}")
         if self.gait_refine and self.stage != "flat":
             raise ValueError("--gait-refine currently supports only --stage flat")
+        if self.hipx_refine and not self.gait_refine:
+            raise ValueError("--hipx-refine requires --gait-refine")
         if self.speed_curriculum_iterations <= 0:
             raise ValueError("speed_curriculum_iterations must be positive")
         if self.wm_prioritized_frac + self.wm_archive_frac > 1:
@@ -67,6 +70,8 @@ class Trainer(BaseTrainer):
             changed_stage = checkpoint["cfg"]["stage"] != cfg.stage
             if bool(checkpoint["cfg"].get("gait_refine", False)) != cfg.gait_refine:
                 cfg.reset_critic = True  # The reward changed; the old value target is stale.
+            if bool(checkpoint["cfg"].get("hipx_refine", False)) != cfg.hipx_refine:
+                cfg.reset_critic = True
             if cfg.continue_run and changed_stage:
                 raise ValueError("--continue-run requires the same stage; omit it for stage transfer")
             if changed_stage:
@@ -74,7 +79,8 @@ class Trainer(BaseTrainer):
         self.cfg = cfg
         torch.manual_seed(cfg.seed)
         env_cfg = load_env_cfg(cfg.task)
-        self.weights = gait_refine_weights() if cfg.gait_refine else WEIGHTS
+        self.weights = (hipx_refine_weights() if cfg.hipx_refine else
+                        gait_refine_weights() if cfg.gait_refine else WEIGHTS)
         if cfg.gait_refine:
             for name, value in vars(self.weights).items():
                 if name != "terminated":
