@@ -41,6 +41,7 @@ class TrainCfg(BaseCfg):
     amp_updates: int = 2
     amp_lr: float = 1e-4
     gait_anchor_weight: float = 0.0
+    harder_stairs: bool = False
     task: str = TASKS["flat"]
     speed_curriculum_iterations: int = 15_000
     warmup_iterations: int = 1000
@@ -74,6 +75,8 @@ class TrainCfg(BaseCfg):
         if self.gait_anchor_weight < 0 or (self.gait_anchor_weight > 0 and
                                            (self.stage != "terrain" or not self.resume)):
             raise ValueError("--gait-anchor-weight requires a terrain run resumed from a checkpoint")
+        if self.harder_stairs and self.stage != "terrain":
+            raise ValueError("--harder-stairs requires --stage terrain")
         if self.speed_curriculum_iterations <= 0:
             raise ValueError("speed_curriculum_iterations must be positive")
         if self.wm_prioritized_frac + self.wm_archive_frac > 1:
@@ -105,6 +108,10 @@ class Trainer(BaseTrainer):
                 cfg.reset_critic = True
             if bool(checkpoint["cfg"].get("amp_motion_dir", "")) != bool(cfg.amp_motion_dir):
                 cfg.reset_critic = True
+            if bool(checkpoint["cfg"].get("harder_stairs", False)) != cfg.harder_stairs:
+                cfg.reset_critic = True
+                if cfg.continue_run:
+                    raise ValueError("Changing stair geometry requires a new run; omit --continue-run")
             if cfg.continue_run and changed_stage:
                 raise ValueError("--continue-run requires the same stage; omit it for stage transfer")
             if changed_stage:
@@ -112,6 +119,9 @@ class Trainer(BaseTrainer):
         self.cfg = cfg
         torch.manual_seed(cfg.seed)
         env_cfg = load_env_cfg(cfg.task)
+        if cfg.harder_stairs:
+            from .env import extended_stairs
+            extended_stairs(env_cfg)
         self.weights = (hipx_target_refine_weights() if cfg.hipx_target_refine else
                         hipx_refine_weights() if cfg.hipx_refine else
                         gait_refine_weights() if cfg.gait_refine else WEIGHTS)

@@ -53,7 +53,8 @@ def main():
     from mjlab.envs import ManagerBasedRlEnv
     from mjlab.viewer.viewer_config import ViewerConfig
     stage = args.stage or ckpt["cfg"]["stage"]
-    cfg = make_env_cfg(stage, play=True)
+    harder_stairs = bool(ckpt["cfg"].get("harder_stairs", False)) and stage == "terrain"
+    cfg = make_env_cfg(stage, play=True, harder_stairs=harder_stairs)
     cfg.seed = args.seed
     cfg.scene.num_envs = 1 if args.viewer else args.num_envs
     cfg.auto_reset = args.viewer

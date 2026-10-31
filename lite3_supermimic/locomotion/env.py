@@ -167,7 +167,23 @@ def terrain_curriculum(env, env_ids):
     return {"mean_level": terrain.terrain_levels.float().mean()}
 
 
-def make_env_cfg(stage="flat", play=False):
+def extended_stairs(cfg):
+    """Extend the existing stair curriculum without changing the original rows.
+
+    Rows 0..4 remain 2..10 cm per step; rows 5..8 add 12..18 cm.
+    Starting at rows 0..4 lets a transferred policy reach the new rows by
+    successful travel, rather than spawning on the hardest stairs immediately.
+    """
+    terrain = cfg.scene.terrain
+    gen = terrain.terrain_generator
+    gen.num_rows = 9
+    for name in ("stairs", "stairs_inv"):
+        gen.sub_terrains[name].step_height_range = (0.02, 0.18)
+    terrain.max_init_terrain_level = 4
+    return cfg
+
+
+def make_env_cfg(stage="flat", play=False, harder_stairs=False):
     spec = STAGES[stage]
     # Borrow only robot/physics/sensor setup and proprioceptive observation config.
     cfg = lite3_chase_env_cfg(play=False, terrain=spec.terrain)
@@ -213,6 +229,8 @@ def make_env_cfg(stage="flat", play=False):
         cfg.scene.terrain.max_init_terrain_level = 0
         cfg.curriculum["terrain_levels"] = CurriculumTermCfg(func=terrain_curriculum)
         cfg.terminations["tile_boundary"] = TerminationTermCfg(func=tile_boundary, time_out=True)
+        if harder_stairs:
+            extended_stairs(cfg)
     return cfg
 
 
