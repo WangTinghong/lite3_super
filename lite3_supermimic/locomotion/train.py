@@ -22,6 +22,7 @@ from .config import (
     hipx_refine_weights, hipx_target_refine_weights,
 )
 from .core import TERMS, foot_clearances, validate_checkpoint
+from .amp import AMPStyle, MOTION_RATES
 from .imagine import Imagination
 
 
@@ -32,6 +33,13 @@ class TrainCfg(BaseCfg):
     gait_refine: bool = False
     hipx_refine: bool = False
     hipx_target_refine: bool = False
+    amp_motion_dir: str = ""
+    amp_weight: float = 0.5
+    amp_start_iteration: int = 500
+    amp_ramp_iterations: int = 1000
+    amp_batch: int = 512
+    amp_updates: int = 2
+    amp_lr: float = 1e-4
     task: str = TASKS["flat"]
     speed_curriculum_iterations: int = 15_000
     warmup_iterations: int = 1000
@@ -51,6 +59,17 @@ class TrainCfg(BaseCfg):
             raise ValueError("--hipx-refine requires --gait-refine")
         if self.hipx_target_refine and not (self.gait_refine and self.hipx_refine):
             raise ValueError("--hipx-target-refine requires --gait-refine --hipx-refine")
+        if self.amp_motion_dir:
+            if self.stage != "flat" or not self.gait_refine:
+                raise ValueError("--amp-motion-dir currently requires --stage flat --gait-refine")
+            missing = [name for name in MOTION_RATES
+                       if not (Path(self.amp_motion_dir).expanduser() / name).is_file()]
+            if missing:
+                raise ValueError(f"AMP motion files missing from {self.amp_motion_dir}: {missing}")
+        if self.amp_weight < 0 or self.amp_start_iteration < 0 or self.amp_ramp_iterations <= 0:
+            raise ValueError("AMP weight/start/ramp must be nonnegative/nonnegative/positive")
+        if self.amp_batch <= 0 or self.amp_updates < 0 or self.amp_lr <= 0:
+            raise ValueError("AMP batch/updates/lr must be positive/nonnegative/positive")
         if self.speed_curriculum_iterations <= 0:
             raise ValueError("speed_curriculum_iterations must be positive")
         if self.wm_prioritized_frac + self.wm_archive_frac > 1:
@@ -79,6 +98,8 @@ class Trainer(BaseTrainer):
             if bool(checkpoint["cfg"].get("hipx_refine", False)) != cfg.hipx_refine:
                 cfg.reset_critic = True
             if bool(checkpoint["cfg"].get("hipx_target_refine", False)) != cfg.hipx_target_refine:
+                cfg.reset_critic = True
+            if bool(checkpoint["cfg"].get("amp_motion_dir", "")) != bool(cfg.amp_motion_dir):
                 cfg.reset_critic = True
             if cfg.continue_run and changed_stage:
                 raise ValueError("--continue-run requires the same stage; omit it for stage transfer")
@@ -111,6 +132,8 @@ class Trainer(BaseTrainer):
         if self.obs.shape[-1] != obs_dim:
             raise ValueError("Locomotion observation dimension mismatch")
         self.consts = st.robot_consts(self.env)
+        self.amp = (AMPStyle(cfg.amp_motion_dir, self.env.step_dt, self.dev, cfg.amp_lr)
+                    if cfg.amp_motion_dir else None)
         self.ctx = st.ContextReader(self.env)
         # Startup COM randomisation has already run. Its reference must be the
         # original MuJoCo model, not each world's already-randomised COM.
@@ -123,7 +146,8 @@ class Trainer(BaseTrainer):
         self.actor = Actor(obs_dim, cfg.actor_hidden, 12).to(self.dev)
         self.imag = Imagination(ImagineCfg(horizon=cfg.horizon, dt=self.env.step_dt,
                                 compile=cfg.compile, sensor_grad=cfg.sensor_grad, weights=self.weights),
-                                self.consts, STAGES[cfg.stage], HISTORY, self.dev, self.field)
+                                self.consts, STAGES[cfg.stage], HISTORY, self.dev, self.field,
+                                amp=self.amp)
         self.critic = Critic(self.imag.critic_dim, cfg.critic_hidden).to(self.dev)
         self.opt_wm = torch.optim.Adam(self.wm.parameters(), lr=cfg.lr)
         self.opt_actor = torch.optim.Adam(self.actor.parameters(), lr=cfg.lr, betas=(0.9, 0.95))
@@ -152,6 +176,10 @@ class Trainer(BaseTrainer):
         ckpt = torch.load(path, map_location=self.dev, weights_only=False)
         validate_checkpoint(ckpt)
         super().load(path)
+        if self.amp is not None and "amp_style" in ckpt:
+            self.amp.load_state_dict(ckpt["amp_style"])
+            if "amp_optimizer" in ckpt:
+                self.amp.optimizer.load_state_dict(ckpt["amp_optimizer"])
         if self.cfg.continue_run:
             self.env.common_step_counter = ckpt.get("command_steps", self.start_it * self.cfg.collect_steps)
             self.env_steps = ckpt.get("env_steps", 0)
@@ -233,6 +261,9 @@ class Trainer(BaseTrainer):
                     opt_actor=self.opt_actor.state_dict(), opt_critic=self.opt_critic.state_dict(),
                     env_steps=self.env_steps, command_steps=self.env.common_step_counter,
                     terrain_levels=terrain.terrain_levels if self.field is not None else None)
+        if self.amp is not None:
+            data["amp_style"] = self.amp.state_dict()
+            data["amp_optimizer"] = self.amp.optimizer.state_dict()
         temporary = path.with_suffix(".tmp")
         torch.save(data, temporary)
         temporary.replace(path)
@@ -253,8 +284,16 @@ class Trainer(BaseTrainer):
                         group["lr"] = lr_at(cfg, it) * scale
                 self.collect()
                 stats = {"wm_loss": self.fit_world_model()}
+                if self.amp is not None:
+                    stats.update(self.amp.fit(self.buf, self.consts.default_q,
+                                              cfg.amp_batch, cfg.amp_updates))
+                    progress = max(0.0, (it - cfg.amp_start_iteration) / cfg.amp_ramp_iterations)
+                    self.imag.amp_scale = cfg.amp_weight * min(1.0, progress)
+                    stats["amp_scale"] = self.imag.amp_scale
                 if it > self.policy_start:
                     stats.update(self.improve_policy())
+                    if self.amp is not None:
+                        stats["amp_imagined_reward"] = self.imag.last_amp_reward
                 if it % cfg.log_interval == 0:
                     mins = (time.time() - started) / 60
                     fall_rate = self.window_falls / max(1, self.window_steps) / self.env.step_dt * 60

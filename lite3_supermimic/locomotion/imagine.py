@@ -10,9 +10,10 @@ from .core import TERMS, advance_commands, observation, reward_terms
 
 
 class Imagination(BaseImagination):
-    def __init__(self, cfg, consts, stage, history, device, field=None):
+    def __init__(self, cfg, consts, stage, history, device, field=None, amp=None):
         self.cfg, self.c, self.stage = cfg, consts, stage
         self.h, self.device, self.field = history, device, field
+        self.amp, self.amp_scale, self.last_amp_reward = amp, 0.0, 0.0
         # Include command timer and speed ceiling: both affect future commands.
         self.critic_dim = st.STATE_DIM + 5 + st.CONTEXT_DIM + tr.SCAN_POINTS
         self._step_fn = torch.compile(self._step, dynamic=False) if cfg.compile else self._step
@@ -58,16 +59,26 @@ class Imagination(BaseImagination):
         survival = torch.ones(len(s), device=s.device)
         ret = torch.zeros_like(survival)
         rewards, survivals, critic_inputs = [], [], []
+        amp_rewards = []
         discount = 1.0
         for _ in range(cfg.horizon):
             survivals.append(survival)
+            previous_s, command = s, commands[:, :3]
             s, pose, prev, hist, commands, r, d, x = self._step_fn(
                 s, pose, prev, hist, commands, xi, bias, c, actor, wm)
+            if self.amp is not None and self.amp_scale > 0:
+                gate = ((command[:, 0] - 0.3) / 0.2).clamp(0, 1)
+                gate = gate * (1 - command[:, 1].abs() / 0.15).clamp(0, 1)
+                gate = gate * (1 - command[:, 2].abs() / 0.3).clamp(0, 1)
+                style = self.amp.reward(previous_s, s, c.default_q) * gate
+                r = r + self.amp_scale * style * cfg.dt
+                amp_rewards.append(style.detach())
             rewards.append(r)
             critic_inputs.append(x)
             ret = ret + discount * survival * r
             survival = survival * (1 - d)
             discount *= cfg.gamma
+        self.last_amp_reward = (float(torch.stack(amp_rewards).mean()) if amp_rewards else 0.0)
         last = self.critic_input(s, pose, commands, xi)
         ret = ret + discount * survival * critic(last).squeeze(-1)
         return ret, {"rewards": torch.stack(rewards, 1),

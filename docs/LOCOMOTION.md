@@ -1,5 +1,7 @@
 # Lite3 运动控制：独立分支与四阶段训练
 
+平地直行步态的 AMP 实验见 [AMP 步态实验](AMP_GAIT.md)。该实验需要单独分支和本机原项目中的两段动作 JSON，不会修改追逐任务。
+
 本功能在 `codex/lite3-locomotion` 分支。原有 Chase 源码、任务名称、训练脚本和模型格式均未修改。新任务单独缩短四条小腿的简化碰撞胶囊 3 cm，使足底球及接触传感器真实接触地面；原机器人 MJCF 文件不变。新模块为 `lite3_supermimic/locomotion`，新入口为 `scripts/train_locomotion.py`、`scripts/eval_locomotion.py`。
 
 这是一套待训练、待 GPU 验证的实验实现；创建四个任务不等于机器人已经具备高速稳定或步态自适应能力。已有的追逐检查点不能直接加载到这些任务。
