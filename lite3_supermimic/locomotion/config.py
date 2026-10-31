@@ -1,5 +1,5 @@
 """Four training stages. Speed limits are experiment settings, not validated capabilities."""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 @dataclass(frozen=True)
@@ -35,6 +35,8 @@ class Rewards:
     base_height: float = -2.0
     roll_pitch_rate: float = -0.03
     vertical_velocity: float = -0.1
+    diagonal_contact: float = 0.0
+    all_airborne: float = 0.0
     action_rate: float = -0.02
     joint_limits: float = -1.0
     joint_torques: float = -2e-5
@@ -46,3 +48,9 @@ class Rewards:
 
 
 WEIGHTS = Rewards()
+
+
+def gait_refine_weights() -> Rewards:
+    """Flat-ground, moderate-speed experiment; original task keeps WEIGHTS."""
+    return replace(WEIGHTS, vertical_velocity=-0.8,
+                   diagonal_contact=-1.5, all_airborne=-0.8)

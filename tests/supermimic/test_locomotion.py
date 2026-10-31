@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lite3_supermimic.locomotion.config import HISTORY, SCHEMA, STAGES, TASKS, WEIGHTS
+from lite3_supermimic.locomotion.config import HISTORY, SCHEMA, STAGES, TASKS, WEIGHTS, gait_refine_weights
 from lite3_supermimic.locomotion.core import (
     TERMS, advance_commands, feet_world, foot_clearances, observation, reward_terms,
     sample_commands, validate_checkpoint,
@@ -67,6 +67,25 @@ def test_tracking_reward_prefers_command_matching_and_standing():
     assert torch.all(r1["track_yaw"] > r0["track_yaw"])
     assert set(r1) == set(vars(WEIGHTS)) - {"terminated"}
     assert all(torch.isfinite(v).all() for v in r1.values())
+
+
+def test_optional_gait_reward_distinguishes_diagonal_stance_from_hopping():
+    s, p, a, c = inputs(4)
+    feet = s[:, st.FEET].reshape(4, 4, 3)
+    feet[0, [1, 2], 2] += 0.10  # FR+HL: a diagonal stance.
+    feet[1, 3, 2] += 0.10  # FR+FL+HR: FR lands before HL.
+    feet[2, :, 2] += 0.10  # All four airborne.
+    feet[3, :, 2] += 0.10  # Airborne while turning: gait terms are gated off.
+    command = torch.tensor([[1., 0., 0.], [1., 0., 0.],
+                            [1., 0., 0.], [1., 0., 0.6]])
+    r = reward_terms(s, s, p, p, a, a, command, c, .02)
+    assert r["diagonal_contact"][0] < r["diagonal_contact"][1]
+    assert r["all_airborne"][0] < r["all_airborne"][2]
+    assert r["diagonal_contact"][3] == 0
+    assert r["all_airborne"][3] == 0
+    assert WEIGHTS.diagonal_contact == WEIGHTS.all_airborne == 0
+    assert gait_refine_weights().diagonal_contact < 0
+    assert gait_refine_weights().all_airborne < 0
 
 
 def test_observation_history_has_no_target_slot():

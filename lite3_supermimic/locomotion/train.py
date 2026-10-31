@@ -17,7 +17,7 @@ from lite3_supermimic.supermimic.imagine import ImagineCfg
 from lite3_supermimic.supermimic.train import Actor, Critic, TrainCfg as BaseCfg, Trainer as BaseTrainer, lr_at
 from lite3_supermimic.supermimic.world_model import WorldModel
 from lite3_supermimic.target import terrain as tr
-from .config import HISTORY, SCHEMA, STAGES, TASKS, WEIGHTS
+from .config import HISTORY, SCHEMA, STAGES, TASKS, WEIGHTS, gait_refine_weights
 from .core import TERMS, foot_clearances, validate_checkpoint
 from .imagine import Imagination
 
@@ -26,6 +26,7 @@ from .imagine import Imagination
 class TrainCfg(BaseCfg):
     device: str = "cuda:0"
     stage: str = "flat"
+    gait_refine: bool = False
     task: str = TASKS["flat"]
     speed_curriculum_iterations: int = 15_000
     warmup_iterations: int = 1000
@@ -39,6 +40,8 @@ class TrainCfg(BaseCfg):
         super().__post_init__()
         if self.stage not in STAGES:
             raise ValueError(f"stage must be one of {tuple(STAGES)}")
+        if self.gait_refine and self.stage != "flat":
+            raise ValueError("--gait-refine currently supports only --stage flat")
         if self.speed_curriculum_iterations <= 0:
             raise ValueError("speed_curriculum_iterations must be positive")
         if self.wm_prioritized_frac + self.wm_archive_frac > 1:
@@ -62,6 +65,8 @@ class Trainer(BaseTrainer):
             checkpoint = torch.load(cfg.resume, map_location="cpu", weights_only=False)
             validate_checkpoint(checkpoint)
             changed_stage = checkpoint["cfg"]["stage"] != cfg.stage
+            if bool(checkpoint["cfg"].get("gait_refine", False)) != cfg.gait_refine:
+                cfg.reset_critic = True  # The reward changed; the old value target is stale.
             if cfg.continue_run and changed_stage:
                 raise ValueError("--continue-run requires the same stage; omit it for stage transfer")
             if changed_stage:
@@ -69,6 +74,11 @@ class Trainer(BaseTrainer):
         self.cfg = cfg
         torch.manual_seed(cfg.seed)
         env_cfg = load_env_cfg(cfg.task)
+        self.weights = gait_refine_weights() if cfg.gait_refine else WEIGHTS
+        if cfg.gait_refine:
+            for name, value in vars(self.weights).items():
+                if name != "terminated":
+                    env_cfg.rewards[name].weight = value
         env_cfg.scene.num_envs, env_cfg.seed = cfg.num_envs, cfg.seed
         env_cfg.commands["velocity"].curriculum_steps = cfg.speed_curriculum_iterations * cfg.collect_steps
         self.env_cfg = env_cfg
@@ -97,7 +107,7 @@ class Trainer(BaseTrainer):
         self.wm = WorldModel(cfg.wm_hidden).to(self.dev)
         self.actor = Actor(obs_dim, cfg.actor_hidden, 12).to(self.dev)
         self.imag = Imagination(ImagineCfg(horizon=cfg.horizon, dt=self.env.step_dt,
-                                compile=cfg.compile, sensor_grad=cfg.sensor_grad, weights=WEIGHTS),
+                                compile=cfg.compile, sensor_grad=cfg.sensor_grad, weights=self.weights),
                                 self.consts, STAGES[cfg.stage], HISTORY, self.dev, self.field)
         self.critic = Critic(self.imag.critic_dim, cfg.critic_hidden).to(self.dev)
         self.opt_wm = torch.optim.Adam(self.wm.parameters(), lr=cfg.lr)

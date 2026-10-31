@@ -65,6 +65,15 @@ def reward_terms(s0, s1, p0, p1, a, prev, command, c, dt, field=None):
     vf = (feet_world(s1, p1, field) - feet_world(s0, p0, field)) / dt
     speed2 = vf[..., :2].square().sum(-1)
     contact = torch.sigmoid((0.015 - clear) / 0.01)
+    # A soft contact proxy keeps the same gait objective differentiable in the
+    # world-model rollout. Apply only to near-straight, moderate forward motion;
+    # standing, turning and terrain adaptation should remain unconstrained.
+    gait_gate = ((command[:, 0] - 0.3) / 0.2).clamp(0, 1)
+    gait_gate = gait_gate * (1 - command[:, 1].abs() / 0.3).clamp(0, 1)
+    gait_gate = gait_gate * (1 - command[:, 2].abs() / 0.5).clamp(0, 1)
+    diagonal_mismatch = ((contact[:, 0] - contact[:, 3]).abs()
+                         + (contact[:, 1] - contact[:, 2]).abs()) * 0.5
+    flight = (1 - contact).prod(-1)
     relief = tr.relief(p1[:, :2], p1[:, 2], field)
     rough = (relief.amax(-1) - relief.amin(-1)).clamp(0, 0.12)
     desired_clearance = 0.04 + rough[:, None] * 0.5
@@ -75,6 +84,8 @@ def reward_terms(s0, s1, p0, p1, a, prev, command, c, dt, field=None):
         "base_height": (s1[:, 0] - 0.28).square(),
         "roll_pitch_rate": s1[:, 7:9].square().sum(-1),
         "vertical_velocity": s1[:, 6].square(),
+        "diagonal_contact": gait_gate * diagonal_mismatch,
+        "all_airborne": gait_gate * flight,
         "action_rate": (a - prev).square().sum(-1),
         "joint_limits": ((c.soft_limits[..., 0] - q).clamp(min=0)
                          + (q - c.soft_limits[..., 1]).clamp(min=0)).sum(-1),
