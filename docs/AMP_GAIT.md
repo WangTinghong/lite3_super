@@ -29,7 +29,7 @@ python -m pytest tests/supermimic/test_locomotion_amp.py -q
 建议从已经训练的 `flat_hipx_target_refine/model_4000.pt` 开始一个**新**训练实验，保留原检查点用于对照：
 
 ```bash
-SOURCE="$HOME/gpufree-data/lite3_gait/logs/lite3_locomotion/2026-10-31_16-00-56-897021_flat_hipx_target_refine/model_4000.pt"
+SOURCE="$HOME/gpufree-data/lite3_hipx_target/logs/lite3_locomotion/2026-10-31_16-00-56-897021_flat_hipx_target_refine/model_4000.pt"
 MOTIONS="$HOME/gpufree-data/lite3_amp_motions"
 test -f "$SOURCE" && test -f "$MOTIONS/lite3_直行慢速.json" && test -f "$MOTIONS/lite3_直行快速.json"
 ```
