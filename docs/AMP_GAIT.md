@@ -31,14 +31,35 @@ python -m pytest tests/supermimic/test_locomotion_amp.py -q
 ```bash
 SOURCE="$HOME/gpufree-data/lite3_gait/logs/lite3_locomotion/2026-10-31_16-00-56-897021_flat_hipx_target_refine/model_4000.pt"
 MOTIONS="$HOME/gpufree-data/lite3_amp_motions"
+test -f "$SOURCE" && test -f "$MOTIONS/lite3_直行慢速.json" && test -f "$MOTIONS/lite3_直行快速.json"
+```
+
+先运行一个短时冒烟测试，确认 GPU 上的 AMP 判别器训练、想象奖励、策略更新和存盘都能完成。这个小模型只用于检查流程，不作为正式策略：
+
+```bash
+python scripts/train_locomotion.py --stage flat --gait-refine \
+  --hipx-refine --hipx-target-refine --amp-motion-dir "$MOTIONS" \
+  --resume "$SOURCE" --num-envs 64 --iterations 30 \
+  --warmup-iterations 5 --critic-warmup-iterations 5 \
+  --actor-ramp-iterations 5 --speed-curriculum-iterations 10 \
+  --amp-start-iteration 1 --amp-ramp-iterations 5 \
+  --amp-batch 64 --amp-updates 1 --wm-batch 64 --imag-batch 64 \
+  --archive-size 1000 --no-compile --save-interval 30 \
+  --run-name smoke_amp_gait --log-interval 5
+```
+
+通过后，从原始 `SOURCE` 重新开始正式实验：
+
+```bash
 python scripts/train_locomotion.py --stage flat --gait-refine \
   --hipx-refine --hipx-target-refine --amp-motion-dir "$MOTIONS" \
   --resume "$SOURCE" --num-envs 2048 --iterations 4000 \
   --warmup-iterations 1000 --actor-lr-scale 0.2 \
+  --speed-curriculum-iterations 1500 \
   --run-name flat_amp_gait --log-interval 10
 ```
 
-启动后判别器会先学习；AMP 权重从第 500 次起缓慢增加，到第 1500 次达到默认值 0.5。载入未使用 AMP 的检查点时，价值网络重置并热身，策略权重及世界模型沿用。新实验会写入新的日志目录。TensorBoard 查看 `train/amp_d_expert`、`train/amp_d_policy`、`train/amp_scale`、`train/amp_imagined_reward`，同时关注速度误差和跌倒率。判别器分数只供诊断，不能代替真实评估。
+启动后判别器会先学习；AMP 权重从第 500 次起缓慢增加，到第 1500 次达到默认值 0.5。速度课程也在第 1500 次达到平地阶段的 1.0 m/s 上限，使 4000 次实验能覆盖目标速度。载入未使用 AMP 的检查点时，价值网络重置并热身，策略权重及世界模型沿用。新实验会写入新的日志目录。TensorBoard 查看 `train/amp_d_expert`、`train/amp_d_policy`、`train/amp_scale`、`train/amp_imagined_reward`，同时关注速度误差和跌倒率。判别器分数只供诊断，不能代替真实评估。
 
 ## 对照评估
 
