@@ -50,6 +50,8 @@ python scripts/train_locomotion.py --stage flat --gait-refine --resume "$SOURCE"
 
 分别用原检查点和本实验检查点，在相同 seed、相同速度下记录 `--gait-csv` 和 MP4。至少比较 0.5 与 1.0 m/s，检查：速度误差、跌倒、四足均腾空的时间比例、FR–HL/FL–HR 落地时差、四足支撑比例。若腾空减少但开始拖脚、速度误差或跌倒增加，则这组奖励不合格；不要只看训练损失或想象回报。
 
+若视频中某条腿的髋关节摆幅异常，可同时加 `--joint-csv eval/joints.csv`。此文件逐步记录 12 个关节的实际角度、控制目标、角速度与仿真器关节空间驱动力矩，并记录机身高度和垂直速度；与同一次运行的 `--gait-csv` 时间戳一致，便于检查摆幅、限位、落脚和机身弹跳的关系。`HipX` 是外展/内收，`HipY` 是前后摆动；不能仅靠视频把两种髋关节轴混为一谈。
+
 ```bash
 MODEL='logs/lite3_locomotion/新实验目录/model_8000.pt'
 python scripts/eval_locomotion.py --checkpoint "$MODEL" --stage flat --vx 1.0 \

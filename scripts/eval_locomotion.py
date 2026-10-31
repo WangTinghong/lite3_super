@@ -11,6 +11,7 @@ import torch
 from lite3_supermimic.locomotion.config import STAGES
 from lite3_supermimic.locomotion.core import foot_clearances, validate_checkpoint
 from lite3_supermimic.locomotion.metrics import Metrics, read_contacts
+from lite3_supermimic.robot.constants import JOINT_NAMES
 from lite3_supermimic.supermimic import state as st
 from lite3_supermimic.supermimic.train import Actor
 
@@ -34,6 +35,7 @@ def main():
     parser.add_argument("--keyboard", action="store_true", help="Change velocity commands with keys in --viewer")
     parser.add_argument("--output", help="JSON metrics file")
     parser.add_argument("--gait-csv", help="Env 0 contact/clearance/velocity timeline")
+    parser.add_argument("--joint-csv", help="Env 0 joint position/target/velocity/actuator torque timeline")
     args = parser.parse_args()
     if args.num_envs <= 0 or args.seconds <= 0:
         parser.error("num-envs and seconds must be positive")
@@ -78,7 +80,7 @@ def main():
     cfg.viewer.distance, cfg.viewer.elevation = 3.2, -20.0
     cfg.viewer.width, cfg.viewer.height = 1280, 720
     env = ManagerBasedRlEnv(cfg, device=args.device, render_mode="rgb_array" if args.video else None)
-    writer = video = None
+    writer = joint_writer = video = None
     try:
         env.common_step_counter = cmd_cfg.curriculum_steps
         obs, _ = env.reset()
@@ -119,6 +121,20 @@ def main():
             csvwriter.writerow(["time_s", "cmd_vx", "cmd_vy", "cmd_yaw", "vx", "vy", "yaw_rate",
                                 "terminated", "truncated"] + [f"contact_{leg}" for leg in st.LEGS]
                                + [f"clearance_{leg}_m" for leg in st.LEGS])
+        joint_csvwriter = None
+        if args.joint_csv:
+            robot = env.scene["robot"]
+            if tuple(robot.joint_names) != JOINT_NAMES:
+                raise ValueError("Unexpected Lite3 joint order in joint CSV")
+            Path(args.joint_csv).parent.mkdir(parents=True, exist_ok=True)
+            joint_writer = open(args.joint_csv, "w", newline="")
+            joint_csvwriter = csv.writer(joint_writer)
+            joint_csvwriter.writerow(["time_s", "cmd_vx", "vx", "base_height_m", "base_vz_mps",
+                                      "terminated", "truncated"] +
+                                     [f"{name}_pos_rad" for name in JOINT_NAMES] +
+                                     [f"{name}_target_rad" for name in JOINT_NAMES] +
+                                     [f"{name}_vel_radps" for name in JOINT_NAMES] +
+                                     [f"{name}_actuator_Nm" for name in JOINT_NAMES])
         term = env.command_manager.get_term("velocity")
         metrics = Metrics(env.num_envs, env.device)
         prev = torch.zeros(env.num_envs, 12, device=env.device)
@@ -139,6 +155,15 @@ def main():
                                        + s1[0, [4, 5, 9]].tolist()
                                        + [bool(terminated[0]), bool(truncated[0])]
                                        + contact[0].int().tolist() + clear)
+                if joint_csvwriter:
+                    data = env.scene["robot"].data
+                    joint_csvwriter.writerow([(i + 1) * env.step_dt, float(cmd[0, 0]),
+                                              float(s1[0, 4]), float(s1[0, 0]), float(s1[0, 6]),
+                                              bool(terminated[0]), bool(truncated[0])]
+                                             + data.joint_pos[0].tolist()
+                                             + data.joint_pos_target[0].tolist()
+                                             + data.joint_vel[0].tolist()
+                                             + data.qfrc_actuator[0].tolist())
                 if video:
                     video.add_image(env.render())
                 done = terminated | truncated
@@ -156,6 +181,8 @@ def main():
     finally:
         if writer:
             writer.close()
+        if joint_writer:
+            joint_writer.close()
         if video:
             video.__exit__(None, None, None)
         env.close()
