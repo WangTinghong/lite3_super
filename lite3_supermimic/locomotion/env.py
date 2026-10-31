@@ -180,6 +180,10 @@ def extended_stairs(cfg):
     for name in ("stairs", "stairs_inv"):
         gen.sub_terrains[name].step_height_range = (0.02, 0.18)
     terrain.max_init_terrain_level = 4
+    # Height-field ray casting is a CPU operation over the entire 9 x 7 tile
+    # layout. The default 2 cm grid would need tens of millions of rays here.
+    # A 10 cm grid still samples each 40 cm stair tread four times.
+    cfg.commands["velocity"].field_res = 0.10
     return cfg
 
 

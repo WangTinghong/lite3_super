@@ -14,6 +14,8 @@ def test_extended_stairs_keep_old_rows_and_add_harder_rows():
     assert new.num_rows == 9
     assert original.scene.terrain.max_init_terrain_level == 0
     assert extended.scene.terrain.max_init_terrain_level == 4
+    assert original.commands["velocity"].field_res == 0.02
+    assert extended.commands["velocity"].field_res == 0.10
     for name in ("stairs", "stairs_inv"):
         assert old.sub_terrains[name].step_height_range == (0.02, 0.10)
         assert new.sub_terrains[name].step_height_range == (0.02, 0.18)
