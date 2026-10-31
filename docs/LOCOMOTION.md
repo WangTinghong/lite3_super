@@ -115,6 +115,15 @@ python scripts/eval_locomotion.py --checkpoint "$MODEL" --stage terrain \
   --terrain stairs --terrain-level 1 --vx 0.5 --viewer --seconds 120
 ```
 
+在窗口中用键盘实时调整速度指令（从静止开始，点击 MuJoCo 窗口使其获得焦点）：
+
+```bash
+python scripts/eval_locomotion.py --checkpoint "$MODEL" --stage flat \
+  --viewer --keyboard --seconds 300
+```
+
+每次按键改变一个速度档：`W/S` 前进/后退各 0.1 m/s，`J/L` 左/右横移各 0.1 m/s，`Q/E` 左/右转各 0.15 rad/s，`X` 将三个指令归零。终端会打印当前速度指令。这里控制的是机身坐标系目标速度，策略仍负责生成 12 个关节动作；不会直接用键盘操纵关节。可将 `--stage flat` 改为 `terrain` 并选择 `--terrain stairs --terrain-level 1`。键盘设定的速度限制为对应阶段训练的范围；在高等级地形上宜从低速开始。
+
 视频与接触时间线：
 
 ```bash

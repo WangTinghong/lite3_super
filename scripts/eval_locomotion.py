@@ -31,6 +31,7 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--video")
     parser.add_argument("--viewer", action="store_true", help="Native MuJoCo window; requires DISPLAY on Linux")
+    parser.add_argument("--keyboard", action="store_true", help="Change velocity commands with keys in --viewer")
     parser.add_argument("--output", help="JSON metrics file")
     parser.add_argument("--gait-csv", help="Env 0 contact/clearance/velocity timeline")
     args = parser.parse_args()
@@ -38,6 +39,10 @@ def main():
         parser.error("num-envs and seconds must be positive")
     if args.viewer and args.video:
         parser.error("Choose --viewer or --video for one run")
+    if args.keyboard and not args.viewer:
+        parser.error("--keyboard requires --viewer")
+    if args.keyboard and args.random_commands:
+        parser.error("--keyboard cannot be combined with --random-commands")
     if args.device.startswith("cuda") and not torch.cuda.is_available():
         parser.error("Evaluation requires NVIDIA CUDA")
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
@@ -52,7 +57,8 @@ def main():
     cfg.auto_reset = args.viewer
     # Manual resets preserve terminal kinematics for quantitative evaluation.
     cmd_cfg = cfg.commands["velocity"]
-    cmd_cfg.fixed_command = None if args.random_commands else (args.vx, args.vy, args.yaw_rate)
+    cmd_cfg.fixed_command = None if args.random_commands else ((0.0, 0.0, 0.0) if args.keyboard
+                                                              else (args.vx, args.vy, args.yaw_rate))
     terrain = cfg.scene.terrain.terrain_generator
     if terrain:
         if not 0 <= args.terrain_level < terrain.num_rows:
@@ -81,9 +87,24 @@ def main():
         actor.eval()
         if args.viewer:
             from mjlab.viewer import NativeMujocoViewer
+            if args.keyboard:
+                from lite3_supermimic.locomotion.teleop import KeyboardVelocityControl
+                control = KeyboardVelocityControl(STAGES[stage])
+                term = env.command_manager.get_term("velocity")
+
+                def policy(ob):
+                    command = control.snapshot()
+                    term.cfg.fixed_command = command  # Keep the command after resets/resampling.
+                    term.command[:] = term.command.new_tensor(command)
+                    return actor(ob["actor"])
+
+                print("MuJoCo 窗口获得键盘焦点后：W/S 前进/后退，J/L 左/右横移，"
+                      "Q/E 左/右转，X 停止。每按一次改变速度，速度上限由训练阶段决定。", flush=True)
+                viewer = NativeMujocoViewer(env, policy, key_callback=control.on_key)
+            else:
+                viewer = NativeMujocoViewer(env, lambda ob: actor(ob["actor"]))
             with torch.inference_mode():
-                NativeMujocoViewer(env, lambda ob: actor(ob["actor"])).run(
-                    num_steps=max(1, int(args.seconds / env.step_dt)))
+                viewer.run(num_steps=max(1, int(args.seconds / env.step_dt)))
             return
         if args.video:
             import mediapy
