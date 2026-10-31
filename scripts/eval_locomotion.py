@@ -134,7 +134,8 @@ def main():
                                      [f"{name}_pos_rad" for name in JOINT_NAMES] +
                                      [f"{name}_target_rad" for name in JOINT_NAMES] +
                                      [f"{name}_vel_radps" for name in JOINT_NAMES] +
-                                     [f"{name}_actuator_Nm" for name in JOINT_NAMES])
+                                     [f"{name}_actuator_Nm" for name in JOINT_NAMES] +
+                                     [f"foot_lateral_{leg}_m" for leg in st.LEGS])
         term = env.command_manager.get_term("velocity")
         metrics = Metrics(env.num_envs, env.device)
         prev = torch.zeros(env.num_envs, 12, device=env.device)
@@ -163,7 +164,8 @@ def main():
                                              + data.joint_pos[0].tolist()
                                              + data.joint_pos_target[0].tolist()
                                              + data.joint_vel[0].tolist()
-                                             + data.qfrc_actuator[0].tolist())
+                                             + data.qfrc_actuator[0].tolist()
+                                             + s1[0, st.FEET].reshape(4, 3)[:, 1].tolist())
                 if video:
                     video.add_image(env.render())
                 done = terminated | truncated
