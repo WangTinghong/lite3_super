@@ -134,13 +134,19 @@ def test_stair_foothold_rewards_front_foot_settling_on_upper_tread():
     feet = s[:, st.FEET].reshape(1, 4, 3)
     feet[:, :2, 0], feet[:, :2, 2] = 0.35, -0.05
     command = torch.tensor([[0.5, 0., 0.]])
-    landed = stair_foothold_reward(s, s, p, p, command, field, .02)
+    assert stair_foothold_reward(s, s, p, p, command, field, .02).item() == 0
+    moved = s.clone()
+    moved[:, st.FEET].reshape(1, 4, 3)[:, :2, 0] -= 0.01
+    next_pose = p.clone()
+    next_pose[:, 0] += 0.01  # Base advances at 0.5 m/s; feet stay on the tread.
+    landed = stair_foothold_reward(s, moved, p, next_pose, command, field, .02)
     hovering = s.clone()
+    hovering[:, st.FEET].reshape(1, 4, 3)[:, :2, 0] -= 0.01
     hovering[:, st.FEET].reshape(1, 4, 3)[:, :2, 2] += 0.15
-    high = stair_foothold_reward(hovering, hovering, p, p, command, field, .02)
+    high = stair_foothold_reward(s, hovering, p, next_pose, command, field, .02)
     assert landed.item() > high.item() >= 0
     assert stair_foothold_reward(s, s, p, p, command, None, .02).item() == 0
-    assert stair_foothold_reward(s, s, p, p, command * 0, field, .02).item() == 0
+    assert stair_foothold_reward(s, moved, p, next_pose, command * 0, field, .02).item() == 0
     assert stair_refine_weights().stair_foothold == 0
 
 

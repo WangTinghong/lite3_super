@@ -132,10 +132,12 @@ def stair_hipx_target_penalty(s, pose, a, command, c, field):
 
 
 def stair_foothold_reward(s0, s1, p0, p1, command, field, dt):
-    """Reward a front foot settling onto a higher tread while the base is below it.
+    """Reward a planted front foot on a higher tread while the base advances.
 
     All quantities come from the same state and height map in sim and WM.
-    This complements clearance shaping, which only encourages lifting the foot.
+    The forward-progress factor prevents collecting reward by standing still
+    with a foot on a step. This complements clearance shaping, which only
+    encourages lifting the foot.
     """
     if field is None:
         return s1[:, 0] * 0
@@ -148,10 +150,13 @@ def stair_foothold_reward(s0, s1, p0, p1, command, field, dt):
     settled = torch.exp(-((clearance - 0.01) / 0.05).square())
     foot_speed2 = ((feet1[..., :2] - feet0[..., :2]) / dt).square().sum(-1)
     stable = torch.exp(-foot_speed2 / 0.5**2)
+    travel = (p1[:, :2] - p0[:, :2]) / dt
+    forward_speed = travel[:, 0] * p0[:, 2].cos() + travel[:, 1] * p0[:, 2].sin()
+    progress = (forward_speed / command[:, 0].clamp(min=0.25)).clamp(0, 1)
     forward = ((command[:, 0] - 0.2) / 0.2).clamp(0, 1)
     straight = (1 - command[:, 1].abs() / 0.15).clamp(0, 1)
     straight = straight * (1 - command[:, 2].abs() / 0.3).clamp(0, 1)
-    return (above_base * settled * stable).sum(-1) * 0.5 * forward * straight
+    return (above_base * settled * stable).sum(-1) * 0.5 * progress * forward * straight
 
 
 def reward_terms(s0, s1, p0, p1, a, prev, command, c, dt, field=None,
