@@ -10,7 +10,7 @@ from lite3_supermimic.locomotion.config import (
 )
 from lite3_supermimic.locomotion.core import (
     TERMS, advance_commands, feet_world, foot_clearances, observation, reward_terms,
-    stair_clearance_terms,
+    stair_clearance_terms, stair_hipx_target_penalty,
     sample_commands, validate_checkpoint,
 )
 from lite3_supermimic.supermimic import state as st
@@ -97,6 +97,51 @@ def test_stair_refinement_requires_harder_terrain_and_resume():
         TrainCfg(stage="terrain", stair_refine=True, resume="model.pt")
     assert TrainCfg(stage="terrain", harder_stairs=True, stair_refine=True,
                     resume="model.pt").stair_refine
+    with pytest.raises(ValueError, match="stair-hipx-weight"):
+        TrainCfg(stage="terrain", harder_stairs=True, resume="model.pt",
+                 stair_hipx_weight=2.0)
+
+
+def test_stair_hipx_target_penalty_is_edge_gated_and_differentiable():
+    x = torch.linspace(-1, 1, 101)
+    field = HeightField((x >= 0.2).float().mul(0.18).expand(101, 101).clone(),
+                        (-1., -1.), .02)
+    s, p, a, c = inputs(1)
+    p[:, 0] = -0.15
+    a[:, 0], a[:, 3] = -2.4, 2.4  # FL and FR outward targets are 0.6 rad.
+    cmd = torch.tensor([[0.5, 0., 0.]])
+    action = a.clone().requires_grad_()
+    penalty = stair_hipx_target_penalty(s, p, action, cmd, c, field)
+    assert penalty.item() > 0
+    penalty.sum().backward()
+    assert action.grad[0, 0] < 0 and action.grad[0, 3] > 0
+    assert stair_hipx_target_penalty(s, p, a, cmd, c, None).item() == 0
+    assert stair_hipx_target_penalty(s, p, a, cmd * 0, c, field).item() == 0
+    turn = torch.tensor([[0.5, 0., 0.5]])
+    assert stair_hipx_target_penalty(s, p, a, turn, c, field).item() == 0
+    weights = stair_refine_weights()
+    assert weights.stair_hipx_target_outward == 0
+
+
+def test_eval_metrics_report_progress_and_hipx_target_limit():
+    from lite3_supermimic.locomotion.metrics import Metrics
+    s, p, a, _ = inputs(1)
+    end = p.clone()
+    end[:, 0] = 1.0
+    joint = torch.zeros(1, 12)
+    joint[0, 3] = 0.51  # FR near the 0.523 rad limit.
+    target = joint.clone()
+    target[0, 3] = 0.60
+    metrics = Metrics(1, "cpu")
+    metrics.update_joint(joint, target)
+    metrics.update(s, p, s, end, torch.tensor([[0.5, 0., 0.]]), a, a,
+                   torch.zeros(1, 4, dtype=torch.bool), torch.zeros(1, 4, 3),
+                   torch.tensor([False]), torch.tensor([True]), .02)
+    result = metrics.result()
+    assert result["mean_episode_max_forward_progress_m"] == pytest.approx(1.0)
+    assert result["hipx_outward_mean_rad"][0] == pytest.approx(0.51)
+    assert result["hipx_pos_over_0p5_fraction"][0] == 1.0
+    assert result["hipx_target_over_limit_fraction"][0] == 1.0
 
 
 def test_contact_clearance_uses_each_foot_local_ground():

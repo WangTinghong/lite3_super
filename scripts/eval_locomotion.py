@@ -154,6 +154,8 @@ def main():
                 metrics.update(s0, p0, s1, p1, cmd, a, prev, contact, force,
                                terminated, truncated, env.step_dt, term.height_field,
                                shank_contact, shank_force)
+                data = env.scene["robot"].data
+                metrics.update_joint(data.joint_pos, data.joint_pos_target)
                 if csvwriter:
                     clear = foot_clearances(s1, p1, term.height_field)[0].tolist()
                     csvwriter.writerow([(i + 1) * env.step_dt] + cmd[0].tolist()
@@ -162,7 +164,6 @@ def main():
                                        + contact[0].int().tolist() + clear
                                        + shank_contact[0].int().tolist())
                 if joint_csvwriter:
-                    data = env.scene["robot"].data
                     joint_csvwriter.writerow([(i + 1) * env.step_dt, float(cmd[0, 0]),
                                               float(s1[0, 4]), float(s1[0, 0]), float(s1[0, 6]),
                                               bool(terminated[0]), bool(truncated[0])]

@@ -30,6 +30,7 @@ class VelocityCommandCfg(CommandTermCfg):
     fixed_level: int | None = None
     field_res: float = 0.02
     stair_refine: bool = False
+    stair_hipx_refine: bool = False
     stair_focus_prob: float = 0.0
     min_terrain_level: int = 0
     cache_dir: str = "logs/locomotion_heightfields"
@@ -114,7 +115,8 @@ class VelocityCommand(CommandTerm):
             self._reward_cache = reward_terms(
                 self.prev_s, s, self.prev_pose, pose, env.action_manager.action,
                 self.prev_action, self.command, self.consts, env.step_dt, self.height_field,
-                stair_refine=self.cfg.stair_refine)
+                stair_refine=self.cfg.stair_refine,
+                stair_hipx_refine=self.cfg.stair_hipx_refine)
             self.count += 1
             self.error_sum += (s[:, 4:6] - self.command[:, :2]).norm(dim=-1)
             self.distance += (pose[:, :2] - self.prev_pose[:, :2]).norm(dim=-1)
