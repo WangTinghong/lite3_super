@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import torch
 from .core import feet_world, foot_clearances
+from lite3_supermimic.target import terrain as tr
 
 
 def _read_contacts(sensor, geom_names):
@@ -46,14 +47,55 @@ class Metrics:
         self.shank_without_foot_time = torch.zeros(4, device=device)
         self.shank_contact_events = torch.zeros(4, device=device)
         self.prev_shank_contact = torch.zeros(n, 4, dtype=torch.bool, device=device)
+        self.shank_only_since_liftoff = torch.zeros(n, 4, dtype=torch.bool, device=device)
+        self.clean_touchdowns = torch.zeros(4, device=device)
         self.max_shank_force = 0.0
+        self.start_pose = torch.zeros(n, 3, device=device)
+        self.start_ground = torch.zeros(n, device=device)
+        self.max_ground_gain = torch.zeros(n, device=device)
+        self.max_forward_progress = torch.zeros(n, device=device)
+        self.episode_ground_gain_sum = 0.0
+        self.episode_forward_progress_sum = 0.0
+        self.hipx_pos_sum = torch.zeros(4, device=device)
+        self.hipx_pos_near_limit = torch.zeros(4, device=device)
+        self.hipx_target_over_limit = torch.zeros(4, device=device)
+        self.hipx_samples = 0
+        self.forward_command_samples = 0
+        self.stall_samples = 0
+
+    def update_joint(self, joint_pos, joint_target):
+        """Joint order FL, FR, HL, HR; report FR, FL, HR, HL."""
+        signs = joint_pos.new_tensor([-1, 1, -1, 1])
+        outward = (joint_pos[:, 0::3] * signs)[:, [1, 0, 3, 2]]
+        target = (joint_target[:, 0::3] * signs)[:, [1, 0, 3, 2]]
+        self.hipx_pos_sum += outward.sum(0)
+        self.hipx_pos_near_limit += (outward > 0.50).sum(0)
+        self.hipx_target_over_limit += (target > 0.523).sum(0)
+        self.hipx_samples += len(joint_pos)
 
     def update(self, s0, p0, s1, p1, cmd, a, prev, contact, force, terminated, truncated, dt,
                field=None, shank_contact=None, shank_force=None):
+        new_episode = ~self.prev_valid
+        self.start_pose[new_episode] = p0[new_episode]
+        ground0 = tr.ground(p0[:, :2], field)
+        self.start_ground[new_episode] = ground0[new_episode]
+        self.max_ground_gain[new_episode] = 0
+        self.max_forward_progress[new_episode] = 0
+        gain = (tr.ground(p1[:, :2], field) - self.start_ground).clamp(min=0)
+        self.max_ground_gain = torch.maximum(self.max_ground_gain, gain)
+        dx = p1[:, :2] - self.start_pose[:, :2]
+        heading = self.start_pose[:, 2]
+        forward = dx[:, 0] * heading.cos() + dx[:, 1] * heading.sin()
+        self.max_forward_progress = torch.maximum(self.max_forward_progress, forward)
+        done = terminated | truncated
+        self.episode_ground_gain_sum += float(self.max_ground_gain[done].sum())
+        self.episode_forward_progress_sum += float(self.max_forward_progress[done].sum())
+        forward_command = cmd[:, 0] >= 0.25
+        self.forward_command_samples += int(forward_command.sum())
+        self.stall_samples += int((forward_command & (s1[:, 4] < 0.1)).sum())
         self.samples += self.n
         self.elapsed += dt
         self.falls += int(terminated.sum())
-        done = terminated | truncated
         self.completed += int(done.sum())
         self.survived += int((truncated & ~terminated).sum())
         self.sums["linear_sq"] += float((s1[:, 4:6] - cmd[:, :2]).square().sum())
@@ -80,6 +122,9 @@ class Metrics:
         self.swing_count += (~contact).sum(0)
         self.max_force = max(self.max_force, float(force.norm(dim=-1).max()))
         if shank_contact is not None:
+            self.shank_only_since_liftoff |= shank_contact & ~contact
+            self.clean_touchdowns += (landed & ~self.shank_only_since_liftoff).sum(0)
+            self.shank_only_since_liftoff[landed] = False
             self.shank_contact_time += shank_contact.sum(0) * dt
             self.shank_without_foot_time += (shank_contact & ~contact).sum(0) * dt
             self.shank_contact_events += (shank_contact & ~self.prev_shank_contact
@@ -94,6 +139,7 @@ class Metrics:
         self.prev_contact[done] = False
         self.has_touch[done] = False
         self.prev_shank_contact[done] = False
+        self.shank_only_since_liftoff[done] = False
 
     def result(self):
         total = max(self.samples, 1)
@@ -102,6 +148,12 @@ class Metrics:
             "falls_per_robot_minute": self.falls / max(self.n * self.elapsed / 60, 1e-9),
             "completed_episodes": self.completed,
             "nonfall_completion_fraction": self.survived / self.completed if self.completed else None,
+            "mean_episode_max_ground_gain_m": self.episode_ground_gain_sum / self.completed if self.completed else None,
+            "mean_episode_max_forward_progress_m": self.episode_forward_progress_sum / self.completed if self.completed else None,
+            "forward_command_stall_fraction": self.stall_samples / self.forward_command_samples if self.forward_command_samples else None,
+            "hipx_outward_mean_rad": (self.hipx_pos_sum / max(self.hipx_samples, 1)).tolist(),
+            "hipx_pos_over_0p5_fraction": (self.hipx_pos_near_limit / max(self.hipx_samples, 1)).tolist(),
+            "hipx_target_over_limit_fraction": (self.hipx_target_over_limit / max(self.hipx_samples, 1)).tolist(),
             "linear_rmse_mps": (self.sums["linear_sq"] / total)**0.5,
             "yaw_rmse_radps": (self.sums["yaw_sq"] / total)**0.5,
             "mean_speed_mps": self.sums["speed"] / total,
@@ -113,6 +165,8 @@ class Metrics:
             "shank_contact_fraction": (self.shank_contact_time / max(self.n * self.elapsed, 1e-9)).tolist(),
             "shank_without_foot_fraction": (self.shank_without_foot_time / max(self.n * self.elapsed, 1e-9)).tolist(),
             "shank_contacts_per_second": (self.shank_contact_events / max(self.n * self.elapsed, 1e-9)).tolist(),
+            "touchdown_without_prior_shank_only_fraction":
+                (self.clean_touchdowns / self.touchdowns.clamp(min=1)).tolist(),
             "max_sampled_shank_force_N": self.max_shank_force,
             "leg_order": ["FR", "FL", "HR", "HL"],
             "duty_factor": (self.contact_time / max(self.n * self.elapsed, 1e-9)).tolist(),

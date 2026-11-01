@@ -36,11 +36,14 @@ def main():
     parser.add_argument("--output", help="JSON metrics file")
     parser.add_argument("--gait-csv", help="Env 0 contact/clearance/velocity timeline")
     parser.add_argument("--joint-csv", help="Env 0 joint position/target/velocity/actuator torque timeline")
+    parser.add_argument("--wm-audit", action="store_true", help="Read-only one/5-step WM errors near stair risers")
     args = parser.parse_args()
     if args.num_envs <= 0 or args.seconds <= 0:
         parser.error("num-envs and seconds must be positive")
     if args.viewer and args.video:
         parser.error("Choose --viewer or --video for one run")
+    if args.viewer and args.wm_audit:
+        parser.error("--wm-audit requires a quantitative run without --viewer")
     if args.keyboard and not args.viewer:
         parser.error("--keyboard requires --viewer")
     if args.keyboard and args.random_commands:
@@ -88,6 +91,20 @@ def main():
         actor = Actor(obs["actor"].shape[-1], tuple(ckpt["cfg"]["actor_hidden"]), 12).to(env.device)
         actor.load_state_dict(ckpt["actor"])
         actor.eval()
+        wm_audit = ctx = None
+        if args.wm_audit:
+            from lite3_supermimic.locomotion.wm_audit import WorldModelAudit
+            from lite3_supermimic.supermimic.world_model import WorldModel
+            if "world_model" not in ckpt:
+                parser.error("checkpoint has no world model")
+            wm = WorldModel(tuple(ckpt["cfg"]["wm_hidden"])).to(env.device)
+            wm.load_state_dict(ckpt["world_model"])
+            wm.eval()
+            ctx = st.ContextReader(env)
+            base_id = int(ctx.base_body)
+            ctx.base_ipos0 = torch.as_tensor(env.sim.mj_model.body_ipos[base_id].copy(),
+                                            dtype=torch.float32, device=env.device).expand(env.num_envs, 3)
+            wm_audit = WorldModelAudit(wm, env.num_envs, env.device)
         if args.viewer:
             from mjlab.viewer import NativeMujocoViewer
             if args.keyboard:
@@ -147,6 +164,7 @@ def main():
                 s0, p0 = st.robot_state(env, term.height_field), st.planar_pose(env)
                 cmd = term.command.clone()
                 a = actor(obs["actor"])
+                xi = ctx.read() if ctx is not None else None
                 obs, _, terminated, truncated, _ = env.step(a)
                 s1, p1 = st.robot_state(env, term.height_field), st.planar_pose(env)
                 contact, force = read_contacts(env.scene["feet_ground_contact"])
@@ -154,6 +172,11 @@ def main():
                 metrics.update(s0, p0, s1, p1, cmd, a, prev, contact, force,
                                terminated, truncated, env.step_dt, term.height_field,
                                shank_contact, shank_force)
+                data = env.scene["robot"].data
+                metrics.update_joint(data.joint_pos, data.joint_pos_target)
+                if wm_audit is not None:
+                    wm_audit.update(s0, p0, s1, p1, a, prev, xi, term.height_field,
+                                    terminated | truncated, contact, shank_contact)
                 if csvwriter:
                     clear = foot_clearances(s1, p1, term.height_field)[0].tolist()
                     csvwriter.writerow([(i + 1) * env.step_dt] + cmd[0].tolist()
@@ -162,7 +185,6 @@ def main():
                                        + contact[0].int().tolist() + clear
                                        + shank_contact[0].int().tolist())
                 if joint_csvwriter:
-                    data = env.scene["robot"].data
                     joint_csvwriter.writerow([(i + 1) * env.step_dt, float(cmd[0, 0]),
                                               float(s1[0, 4]), float(s1[0, 0]), float(s1[0, 6]),
                                               bool(terminated[0]), bool(truncated[0])]
@@ -181,6 +203,8 @@ def main():
                   "terrain_level": args.terrain_level, "command": cmd_cfg.fixed_command,
                   "random_commands": args.random_commands, "seed": args.seed,
                   "num_envs": env.num_envs, **metrics.result()}
+        if wm_audit is not None:
+            result["world_model_audit"] = wm_audit.result()
         print(json.dumps(result, indent=2))
         if args.output:
             Path(args.output).parent.mkdir(parents=True, exist_ok=True)
