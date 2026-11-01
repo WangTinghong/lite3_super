@@ -37,7 +37,12 @@ def main():
     parser.add_argument("--gait-csv", help="Env 0 contact/clearance/velocity timeline")
     parser.add_argument("--joint-csv", help="Env 0 joint position/target/velocity/actuator torque timeline")
     parser.add_argument("--wm-audit", action="store_true", help="Read-only one/5-step WM errors near stair risers")
+    parser.add_argument("--probe-fr-hipy", type=float, default=0.0, help="Evaluation-only FR HipY target offset in radians, max magnitude 0.15")
+    parser.add_argument("--probe-fr-knee", type=float, default=0.0, help="Evaluation-only FR Knee target offset in radians, max magnitude 0.15")
     args = parser.parse_args()
+    if not all(-0.15 <= v <= 0.15 for v in (args.probe_fr_hipy, args.probe_fr_knee)):
+        parser.error("joint probe offsets must be finite and within +/-0.15 rad")
+    probe_on = bool(args.probe_fr_hipy or args.probe_fr_knee)
     if args.num_envs <= 0 or args.seconds <= 0:
         parser.error("num-envs and seconds must be positive")
     if args.viewer and args.video:
@@ -91,6 +96,25 @@ def main():
         actor = Actor(obs["actor"].shape[-1], tuple(ckpt["cfg"]["actor_hidden"]), 12).to(env.device)
         actor.load_state_dict(ckpt["actor"])
         actor.eval()
+        probe_scale = st.robot_consts(env).action_scale if probe_on else None
+        probe_stats = {"samples": 0, "active": 0, "gate_sum": 0.0}
+
+        def get_action(ob, state=None, pose=None, command=None):
+            action = actor(ob["actor"])
+            if not probe_on:
+                return action
+            from lite3_supermimic.locomotion.stair_probe import front_leg_probe
+            term = env.command_manager.get_term("velocity")
+            state = st.robot_state(env, term.height_field) if state is None else state
+            pose = st.planar_pose(env) if pose is None else pose
+            command = term.command if command is None else command
+            contact, _ = read_contacts(env.scene["feet_ground_contact"])
+            action, gate = front_leg_probe(action, state, pose, command, term.height_field,
+                                          contact, probe_scale, args.probe_fr_hipy, args.probe_fr_knee)
+            probe_stats["samples"] += len(action)
+            probe_stats["active"] += int((gate > 0).sum())
+            probe_stats["gate_sum"] += float(gate.sum())
+            return action
         wm_audit = ctx = None
         if args.wm_audit:
             from lite3_supermimic.locomotion.wm_audit import WorldModelAudit
@@ -116,13 +140,13 @@ def main():
                     command = control.snapshot()
                     term.cfg.fixed_command = command  # Keep the command after resets/resampling.
                     term.command[:] = term.command.new_tensor(command)
-                    return actor(ob["actor"])
+                    return get_action(ob)
 
                 print("MuJoCo 窗口获得键盘焦点后：W/S 前进/后退，J/L 左/右横移，"
                       "Q/E 左/右转，X 停止。每按一次改变速度，速度上限由训练阶段决定。", flush=True)
                 viewer = NativeMujocoViewer(env, policy, key_callback=control.on_key)
             else:
-                viewer = NativeMujocoViewer(env, lambda ob: actor(ob["actor"]))
+                viewer = NativeMujocoViewer(env, get_action)
             with torch.inference_mode():
                 viewer.run(num_steps=max(1, int(args.seconds / env.step_dt)))
             return
@@ -163,7 +187,7 @@ def main():
             for i in range(steps):
                 s0, p0 = st.robot_state(env, term.height_field), st.planar_pose(env)
                 cmd = term.command.clone()
-                a = actor(obs["actor"])
+                a = get_action(obs, s0, p0, cmd)
                 xi = ctx.read() if ctx is not None else None
                 obs, _, terminated, truncated, _ = env.step(a)
                 s1, p1 = st.robot_state(env, term.height_field), st.planar_pose(env)
@@ -205,6 +229,12 @@ def main():
                   "num_envs": env.num_envs, **metrics.result()}
         if wm_audit is not None:
             result["world_model_audit"] = wm_audit.result()
+        result["action_probe"] = {
+            "enabled": probe_on, "fr_hipy_delta_rad": args.probe_fr_hipy,
+            "fr_knee_delta_rad": args.probe_fr_knee,
+            "active_fraction": probe_stats["active"] / max(1, probe_stats["samples"]),
+            "mean_gate": probe_stats["gate_sum"] / max(1, probe_stats["samples"]),
+        }
         print(json.dumps(result, indent=2))
         if args.output:
             Path(args.output).parent.mkdir(parents=True, exist_ok=True)
