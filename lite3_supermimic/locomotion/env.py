@@ -1,7 +1,7 @@
 """Opt-in mjlab registration. Original Chase configs/registration remain untouched."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 
 import numpy as np
@@ -29,6 +29,9 @@ class VelocityCommandCfg(CommandTermCfg):
     fixed_command: tuple[float, float, float] | None = None
     fixed_level: int | None = None
     field_res: float = 0.02
+    stair_refine: bool = False
+    stair_focus_prob: float = 0.0
+    min_terrain_level: int = 0
     cache_dir: str = "logs/locomotion_heightfields"
 
     def build(self, env):
@@ -38,7 +41,7 @@ class VelocityCommandCfg(CommandTermCfg):
 class VelocityCommand(CommandTerm):
     def __init__(self, cfg, env):
         super().__init__(cfg, env)
-        self.stage = STAGES[cfg.stage]
+        self.stage = replace(STAGES[cfg.stage], stair_focus_prob=cfg.stair_focus_prob)
         self.robot = env.scene["robot"]
         self.height_field = None
         if self.stage.terrain:
@@ -110,7 +113,8 @@ class VelocityCommand(CommandTerm):
             s, pose = st.robot_state(env, self.height_field), st.planar_pose(env)
             self._reward_cache = reward_terms(
                 self.prev_s, s, self.prev_pose, pose, env.action_manager.action,
-                self.prev_action, self.command, self.consts, env.step_dt, self.height_field)
+                self.prev_action, self.command, self.consts, env.step_dt, self.height_field,
+                stair_refine=self.cfg.stair_refine)
             self.count += 1
             self.error_sum += (s[:, 4:6] - self.command[:, :2]).norm(dim=-1)
             self.distance += (pose[:, :2] - self.prev_pose[:, :2]).norm(dim=-1)
@@ -163,7 +167,8 @@ def terrain_curriculum(env, env_ids):
         failed = env.termination_manager.terminated[env_ids]
         good = seen & ~failed & (error < 0.35) & (term.distance[env_ids] > 3.0)
         levels += good.long() - (seen & failed).long()
-        levels.clamp_(0, terrain.terrain_origins.shape[0] - 1)
+        levels.clamp_(getattr(term.cfg, "min_terrain_level", 0),
+                      terrain.terrain_origins.shape[0] - 1)
     terrain.terrain_levels[env_ids] = levels
     terrain.env_origins[env_ids] = terrain.terrain_origins[levels, terrain.terrain_types[env_ids]]
     return {"mean_level": terrain.terrain_levels.float().mean()}

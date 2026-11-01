@@ -13,6 +13,7 @@ class Stage:
     stand_fraction: float = 0.15
     initial_forward: float = 0.5
     terrain_speed_reduction: float = 0.0
+    stair_focus_prob: float = 0.0
 
 
 STAGES = {
@@ -45,6 +46,9 @@ class Rewards:
     joint_acceleration: float = -2.5e-7
     foot_slip: float = -0.05
     foot_clearance: float = -0.5
+    stair_foot_clearance: float = 0.0
+    shank_clearance: float = 0.0
+    stair_alignment: float = 0.0
     stand_still: float = -0.1
     terminated: float = -200.0
 
@@ -66,3 +70,10 @@ def hipx_refine_weights() -> Rewards:
 def hipx_target_refine_weights() -> Rewards:
     """Also train the policy's own target angles, with a direct actor gradient."""
     return replace(hipx_refine_weights(), hipx_target_outward=-10.0)
+
+
+def stair_refine_weights() -> Rewards:
+    """Opt-in shaping for high steps; retain the existing terrain weights elsewhere."""
+    return replace(WEIGHTS, track_linear=2.5, track_yaw=1.5, upright=0.8,
+                   vertical_velocity=-0.2, stair_foot_clearance=-5.0,
+                   shank_clearance=-3.0, stair_alignment=-0.8)

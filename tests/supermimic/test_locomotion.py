@@ -6,10 +6,11 @@ import torch
 
 from lite3_supermimic.locomotion.config import (
     HISTORY, SCHEMA, STAGES, TASKS, WEIGHTS, gait_refine_weights,
-    hipx_refine_weights, hipx_target_refine_weights,
+    hipx_refine_weights, hipx_target_refine_weights, stair_refine_weights,
 )
 from lite3_supermimic.locomotion.core import (
     TERMS, advance_commands, feet_world, foot_clearances, observation, reward_terms,
+    stair_clearance_terms,
     sample_commands, validate_checkpoint,
 )
 from lite3_supermimic.supermimic import state as st
@@ -46,6 +47,58 @@ def test_commands_resample_on_expiry_and_hold_otherwise():
     assert 0.1 < float((commands == 0).all(-1).float().mean()) < 0.3
 
 
+def test_stair_focus_commands_are_forward_and_match_imagined_resampling():
+    from dataclasses import replace
+    stage = replace(STAGES["terrain"], stair_focus_prob=1.0)
+    vmax = torch.full((256,), 1.5)
+    sampled = sample_commands(256, vmax, stage)
+    assert torch.all((sampled[:, 0] >= 0.25) & (sampled[:, 0] <= 1.0))
+    assert torch.count_nonzero(sampled[:, 1:]) == 0
+    packed = torch.cat((torch.zeros(256, 3), torch.zeros(256, 1), vmax[:, None]), -1)
+    next_command = advance_commands(packed, .02, stage)
+    assert torch.count_nonzero(next_command[:, 1:3]) == 0
+
+
+def test_stair_refinement_detects_riser_and_diagonal_approach():
+    x = torch.linspace(-1, 1, 101)
+    field = HeightField((x >= 0.2).float().mul(0.18).expand(101, 101).clone(),
+                        (-1., -1.), .02)
+    s, p, _, _ = inputs(1)
+    p[:, 0] = -0.15  # Front feet are just before the 18 cm riser.
+    cmd = torch.tensor([[0.5, 0., 0.]])
+    low_foot, _, _ = stair_clearance_terms(s, p, cmd, field)
+    lifted = s.clone()
+    lifted[:, st.FEET].reshape(1, 4, 3)[:, :2, 2] += 0.20
+    high_foot, _, _ = stair_clearance_terms(lifted, p, cmd, field)
+    assert low_foot.item() > high_foot.item() >= 0
+    p[:, 0] = 0
+    shank_low = s.clone()
+    shank_low[:, st.KNEES].reshape(1, 4, 3)[0, 0] = torch.tensor([0.35, -0.1, -0.1])
+    shank_low[:, st.FEET].reshape(1, 4, 3)[0, 0, 0] = 0.05
+    shank_high = shank_low.clone()
+    shank_high[:, st.FEET].reshape(1, 4, 3)[0, 0, 2] += 0.20
+    _, low_collision, _ = stair_clearance_terms(shank_low, p, cmd, field)
+    _, high_collision, _ = stair_clearance_terms(shank_high, p, cmd, field)
+    assert low_collision.item() > high_collision.item() >= 0
+    p[:, 0] = 0.05
+    _, _, aligned = stair_clearance_terms(s, p, cmd, field)
+    p[:, 2] = torch.pi / 4
+    _, _, diagonal = stair_clearance_terms(s, p, cmd, field)
+    assert diagonal.item() > aligned.item()
+    assert stair_refine_weights().stair_foot_clearance < 0
+    assert WEIGHTS.stair_foot_clearance == 0
+
+
+def test_stair_refinement_requires_harder_terrain_and_resume():
+    from lite3_supermimic.locomotion.train import TrainCfg
+    with pytest.raises(ValueError, match="stair-refine"):
+        TrainCfg(stage="terrain", harder_stairs=True, stair_refine=True)
+    with pytest.raises(ValueError, match="stair-refine"):
+        TrainCfg(stage="terrain", stair_refine=True, resume="model.pt")
+    assert TrainCfg(stage="terrain", harder_stairs=True, stair_refine=True,
+                    resume="model.pt").stair_refine
+
+
 def test_contact_clearance_uses_each_foot_local_ground():
     s, p, _, _ = inputs(1)
     # z = x + 1, base ground is 1; front/rear feet sit over different ground.
@@ -70,6 +123,8 @@ def test_tracking_reward_prefers_command_matching_and_standing():
     assert torch.all(r1["track_yaw"] > r0["track_yaw"])
     assert set(r1) == set(vars(WEIGHTS)) - {"terminated"}
     assert all(torch.isfinite(v).all() for v in r1.values())
+    assert all(torch.count_nonzero(r1[name]) == 0 for name in
+               ("stair_foot_clearance", "shank_clearance", "stair_alignment"))
 
 
 def test_optional_gait_reward_distinguishes_diagonal_stance_from_hopping():

@@ -21,7 +21,15 @@ def sample_commands(n: int, vmax: torch.Tensor, stage: Stage) -> torch.Tensor:
     # Independent components include pure turns, straight runs and standing.
     cmd[:, :2] *= (torch.rand(n, 1, device=vmax.device) > 0.1)
     cmd[:, 1:] *= (torch.rand(n, 1, device=vmax.device) > 0.3)
-    return cmd * (torch.rand(n, 1, device=vmax.device) >= stage.stand_fraction)
+    cmd = cmd * (torch.rand(n, 1, device=vmax.device) >= stage.stand_fraction)
+    if stage.stair_focus_prob:
+        # Use the same sampler in the real environment and imagined rollouts.
+        limit = vmax.clamp(max=1.0)
+        forward = 0.25 + torch.rand(n, device=vmax.device) * (limit - 0.25).clamp(min=0)
+        straight = torch.stack((forward, torch.zeros_like(forward), torch.zeros_like(forward)), -1)
+        cmd = torch.where((torch.rand(n, device=vmax.device) < stage.stair_focus_prob)[:, None],
+                          straight, cmd)
+    return cmd
 
 
 def advance_commands(packed: torch.Tensor, dt: float, stage: Stage) -> torch.Tensor:
@@ -52,7 +60,55 @@ def foot_clearances(s, pose, field):
     return feet[..., 2] - tr.ground(feet[..., :2], field) - st.FOOT_RADIUS
 
 
-def reward_terms(s0, s1, p0, p1, a, prev, command, c, dt, field=None):
+def stair_clearance_terms(s, pose, command, field):
+    """Geometry-based, differentiable proxies shared by simulation and imagination.
+
+    A foot approaching a riser must clear the landing surface. Samples along
+    each lower leg discourage using the shank as a contact surface. The local
+    height gradient penalizes a diagonal approach to an edge.
+    """
+    zero = s[:, 0] * 0
+    if field is None:
+        return zero, zero, zero
+    points = st.limb_points_world(s, pose)
+    base_ground = tr.ground(pose[:, :2], field)
+    lift = torch.stack((zero, zero, base_ground), -1)[:, None]
+    feet, knees = points["feet"] + lift, points["knees"] + lift
+    forward = torch.stack((pose[:, 2].cos(), pose[:, 2].sin()), -1)
+    lateral = torch.stack((-forward[:, 1], forward[:, 0]), -1)
+    foot_xy = feet[..., :2]
+    here = tr.ground(foot_xy, field)
+    ahead = torch.maximum(tr.ground(foot_xy + 0.12 * forward[:, None], field),
+                          tr.ground(foot_xy + 0.25 * forward[:, None], field))
+    rise = (ahead - here).clamp(min=0, max=0.25)
+    foot_clear = feet[..., 2] - here - st.FOOT_RADIUS
+    # Positive only near a rising edge. A landing foot already touching its
+    # current surface is not asked to lift until it starts swinging.
+    swing = 0.2 + 0.8 * torch.sigmoid((foot_clear - 0.015) / 0.01)
+    foot_penalty = ((0.04 + rise - foot_clear).clamp(min=0).square()
+                    * swing * (rise / 0.04).clamp(0, 1)).sum(-1)
+
+    # The locomotion-only collision capsule stops 3 cm above the foot centre.
+    # Sample its centreline before that endpoint; terrain penetration predicts
+    # likely riser contact without using simulator-only contact flags.
+    shank_penalty = zero
+    for t in (0.45, 0.70, 0.85):
+        point = knees + t * (feet - knees)
+        deficit = (tr.ground(point[..., :2], field) + 0.025 - point[..., 2]).clamp(min=0)
+        shank_penalty = shank_penalty + deficit.square().sum(-1)
+
+    base = pose[:, :2]
+    grad_f = tr.ground(base + 0.30 * forward, field) - tr.ground(base - 0.30 * forward, field)
+    grad_l = tr.ground(base + 0.30 * lateral, field) - tr.ground(base - 0.30 * lateral, field)
+    edge = ((grad_f.abs() + grad_l.abs() - 0.04) / 0.08).clamp(0, 1)
+    alignment = edge * grad_l.square() / (grad_f.square() + grad_l.square() + 0.0025)
+    moving_forward = ((command[:, 0] - 0.15) / 0.15).clamp(0, 1)
+    return (foot_penalty * moving_forward,
+            shank_penalty * moving_forward,
+            alignment * moving_forward)
+
+
+def reward_terms(s0, s1, p0, p1, a, prev, command, c, dt, field=None, stair_refine=False):
     """Identical state-based shaping on sim/WM; contact is a smooth height proxy.
 
     Contact-force measurements are evaluation metrics, not hidden reward inputs
@@ -86,6 +142,8 @@ def reward_terms(s0, s1, p0, p1, a, prev, command, c, dt, field=None):
     relief = tr.relief(p1[:, :2], p1[:, 2], field)
     rough = (relief.amax(-1) - relief.amin(-1)).clamp(0, 0.12)
     desired_clearance = 0.04 + rough[:, None] * 0.5
+    stair_foot, shank, alignment = (stair_clearance_terms(s1, p1, command, field)
+                                    if stair_refine else (s1[:, 0] * 0,) * 3)
     return {
         "track_linear": torch.exp(-(s1[:, 4:6] - command[:, :2]).square().sum(-1) / 0.25),
         "track_yaw": torch.exp(-(s1[:, 9] - command[:, 2]).square() / 0.25),
@@ -105,6 +163,9 @@ def reward_terms(s0, s1, p0, p1, a, prev, command, c, dt, field=None):
         "foot_slip": (contact * speed2).sum(-1),
         "foot_clearance": ((desired_clearance - clear).clamp(min=0).square()
                            * speed2 * (1 - contact)).sum(-1),
+        "stair_foot_clearance": stair_foot,
+        "shank_clearance": shank,
+        "stair_alignment": alignment,
         "stand_still": (command.abs().sum(-1) < 0.05) * s1[:, st.Q].square().sum(-1),
     }
 

@@ -20,6 +20,7 @@ from lite3_supermimic.target import terrain as tr
 from .config import (
     HISTORY, SCHEMA, STAGES, TASKS, WEIGHTS, gait_refine_weights,
     hipx_refine_weights, hipx_target_refine_weights,
+    stair_refine_weights,
 )
 from .core import TERMS, foot_clearances, validate_checkpoint
 from .amp import AMPStyle, MOTION_RATES, flatness_gate
@@ -42,6 +43,7 @@ class TrainCfg(BaseCfg):
     amp_lr: float = 1e-4
     gait_anchor_weight: float = 0.0
     harder_stairs: bool = False
+    stair_refine: bool = False
     task: str = TASKS["flat"]
     speed_curriculum_iterations: int = 15_000
     warmup_iterations: int = 1000
@@ -77,6 +79,8 @@ class TrainCfg(BaseCfg):
             raise ValueError("--gait-anchor-weight requires a terrain run resumed from a checkpoint")
         if self.harder_stairs and self.stage != "terrain":
             raise ValueError("--harder-stairs requires --stage terrain")
+        if self.stair_refine and (not self.harder_stairs or not self.resume or self.gait_refine):
+            raise ValueError("--stair-refine requires --stage terrain --harder-stairs and --resume")
         if self.speed_curriculum_iterations <= 0:
             raise ValueError("speed_curriculum_iterations must be positive")
         if self.wm_prioritized_frac + self.wm_archive_frac > 1:
@@ -112,6 +116,8 @@ class Trainer(BaseTrainer):
                 cfg.reset_critic = True
                 if cfg.continue_run:
                     raise ValueError("Changing stair geometry requires a new run; omit --continue-run")
+            if bool(checkpoint["cfg"].get("stair_refine", False)) != cfg.stair_refine:
+                cfg.reset_critic = True
             if cfg.continue_run and changed_stage:
                 raise ValueError("--continue-run requires the same stage; omit it for stage transfer")
             if changed_stage:
@@ -122,17 +128,29 @@ class Trainer(BaseTrainer):
         if cfg.harder_stairs:
             from .env import extended_stairs
             extended_stairs(env_cfg)
-        self.weights = (hipx_target_refine_weights() if cfg.hipx_target_refine else
+        self.weights = (stair_refine_weights() if cfg.stair_refine else
+                        hipx_target_refine_weights() if cfg.hipx_target_refine else
                         hipx_refine_weights() if cfg.hipx_refine else
                         gait_refine_weights() if cfg.gait_refine else WEIGHTS)
-        if cfg.gait_refine:
+        if cfg.gait_refine or cfg.stair_refine:
             for name, value in vars(self.weights).items():
                 if name != "terminated":
                     env_cfg.rewards[name].weight = value
         env_cfg.scene.num_envs, env_cfg.seed = cfg.num_envs, cfg.seed
-        env_cfg.commands["velocity"].curriculum_steps = cfg.speed_curriculum_iterations * cfg.collect_steps
+        cmd_cfg = env_cfg.commands["velocity"]
+        cmd_cfg.curriculum_steps = cfg.speed_curriculum_iterations * cfg.collect_steps
+        if cfg.stair_refine:
+            env_cfg.scene.terrain.max_init_terrain_level = 8
+            cmd_cfg.stair_refine = True
+            cmd_cfg.stair_focus_prob = 0.65
+            cmd_cfg.min_terrain_level = 4
         self.env_cfg = env_cfg
         self.env = ManagerBasedRlEnv(cfg=env_cfg, device=cfg.device)
+        if cfg.stair_refine:
+            terrain = self.env.scene.terrain
+            terrain.terrain_levels.clamp_(min=cmd_cfg.min_terrain_level)
+            terrain.env_origins[:] = terrain.terrain_origins[
+                terrain.terrain_levels, terrain.terrain_types]
         self.dev = self.env.device
         self.term = self.env.command_manager.get_term("velocity")
         self.field = self.term.height_field
@@ -162,7 +180,7 @@ class Trainer(BaseTrainer):
                              if cfg.gait_anchor_weight > 0 else None)
         self.imag = Imagination(ImagineCfg(horizon=cfg.horizon, dt=self.env.step_dt,
                                 compile=cfg.compile, sensor_grad=cfg.sensor_grad, weights=self.weights),
-                                self.consts, STAGES[cfg.stage], HISTORY, self.dev, self.field,
+                                self.consts, self.term.stage, HISTORY, self.dev, self.field,
                                 amp=self.amp)
         self.critic = Critic(self.imag.critic_dim, cfg.critic_hidden).to(self.dev)
         self.opt_wm = torch.optim.Adam(self.wm.parameters(), lr=cfg.lr)
