@@ -131,8 +131,31 @@ def stair_hipx_target_penalty(s, pose, a, command, c, field):
     return (((outward - 0.35).clamp(min=0).square() * edge).sum(-1) * straight)
 
 
+def stair_foothold_reward(s0, s1, p0, p1, command, field, dt):
+    """Reward a front foot settling onto a higher tread while the base is below it.
+
+    All quantities come from the same state and height map in sim and WM.
+    This complements clearance shaping, which only encourages lifting the foot.
+    """
+    if field is None:
+        return s1[:, 0] * 0
+    feet0 = feet_world(s0, p0, field)[:, :2]
+    feet1 = feet_world(s1, p1, field)[:, :2]  # FR, FL
+    tread = tr.ground(feet1[..., :2], field)
+    base_ground = tr.ground(p1[:, None, :2], field)
+    above_base = ((tread - base_ground - 0.02) / 0.05).clamp(0, 1)
+    clearance = feet1[..., 2] - tread - st.FOOT_RADIUS
+    settled = torch.exp(-((clearance - 0.01) / 0.05).square())
+    foot_speed2 = ((feet1[..., :2] - feet0[..., :2]) / dt).square().sum(-1)
+    stable = torch.exp(-foot_speed2 / 0.5**2)
+    forward = ((command[:, 0] - 0.2) / 0.2).clamp(0, 1)
+    straight = (1 - command[:, 1].abs() / 0.15).clamp(0, 1)
+    straight = straight * (1 - command[:, 2].abs() / 0.3).clamp(0, 1)
+    return (above_base * settled * stable).sum(-1) * 0.5 * forward * straight
+
+
 def reward_terms(s0, s1, p0, p1, a, prev, command, c, dt, field=None,
-                 stair_refine=False, stair_hipx_refine=False):
+                 stair_refine=False, stair_hipx_refine=False, stair_foothold_refine=False):
     """Identical state-based shaping on sim/WM; contact is a smooth height proxy.
 
     Contact-force measurements are evaluation metrics, not hidden reward inputs
@@ -170,6 +193,8 @@ def reward_terms(s0, s1, p0, p1, a, prev, command, c, dt, field=None,
                                     if stair_refine else (s1[:, 0] * 0,) * 3)
     stair_hipx = (stair_hipx_target_penalty(s1, p1, a, command, c, field)
                    if stair_hipx_refine else s1[:, 0] * 0)
+    stair_foothold = (stair_foothold_reward(s0, s1, p0, p1, command, field, dt)
+                      if stair_foothold_refine else s1[:, 0] * 0)
     return {
         "track_linear": torch.exp(-(s1[:, 4:6] - command[:, :2]).square().sum(-1) / 0.25),
         "track_yaw": torch.exp(-(s1[:, 9] - command[:, 2]).square() / 0.25),
@@ -193,6 +218,7 @@ def reward_terms(s0, s1, p0, p1, a, prev, command, c, dt, field=None,
         "shank_clearance": shank,
         "stair_alignment": alignment,
         "stair_hipx_target_outward": stair_hipx,
+        "stair_foothold": stair_foothold,
         "stand_still": (command.abs().sum(-1) < 0.05) * s1[:, st.Q].square().sum(-1),
     }
 

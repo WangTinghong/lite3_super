@@ -50,6 +50,7 @@ class Rewards:
     shank_clearance: float = 0.0
     stair_alignment: float = 0.0
     stair_hipx_target_outward: float = 0.0
+    stair_foothold: float = 0.0
     stand_still: float = -0.1
     terminated: float = -200.0
 

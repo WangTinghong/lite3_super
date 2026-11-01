@@ -45,6 +45,7 @@ class TrainCfg(BaseCfg):
     harder_stairs: bool = False
     stair_refine: bool = False
     stair_hipx_weight: float = 0.0
+    stair_foothold_weight: float = 0.0
     task: str = TASKS["flat"]
     speed_curriculum_iterations: int = 15_000
     warmup_iterations: int = 1000
@@ -84,6 +85,8 @@ class TrainCfg(BaseCfg):
             raise ValueError("--stair-refine requires --stage terrain --harder-stairs and --resume")
         if self.stair_hipx_weight < 0 or (self.stair_hipx_weight > 0 and not self.stair_refine):
             raise ValueError("--stair-hipx-weight must be nonnegative and requires --stair-refine")
+        if self.stair_foothold_weight < 0 or (self.stair_foothold_weight > 0 and not self.stair_refine):
+            raise ValueError("--stair-foothold-weight must be nonnegative and requires --stair-refine")
         if self.speed_curriculum_iterations <= 0:
             raise ValueError("speed_curriculum_iterations must be positive")
         if self.wm_prioritized_frac + self.wm_archive_frac > 1:
@@ -123,6 +126,8 @@ class Trainer(BaseTrainer):
                 cfg.reset_critic = True
             if float(checkpoint["cfg"].get("stair_hipx_weight", 0.0)) != cfg.stair_hipx_weight:
                 cfg.reset_critic = True
+            if float(checkpoint["cfg"].get("stair_foothold_weight", 0.0)) != cfg.stair_foothold_weight:
+                cfg.reset_critic = True
             if cfg.continue_run and changed_stage:
                 raise ValueError("--continue-run requires the same stage; omit it for stage transfer")
             if changed_stage:
@@ -133,7 +138,8 @@ class Trainer(BaseTrainer):
         if cfg.harder_stairs:
             from .env import extended_stairs
             extended_stairs(env_cfg)
-        self.weights = (replace(stair_refine_weights(), stair_hipx_target_outward=-cfg.stair_hipx_weight)
+        self.weights = (replace(stair_refine_weights(), stair_hipx_target_outward=-cfg.stair_hipx_weight,
+                                stair_foothold=cfg.stair_foothold_weight)
                         if cfg.stair_refine else
                         hipx_target_refine_weights() if cfg.hipx_target_refine else
                         hipx_refine_weights() if cfg.hipx_refine else
@@ -149,6 +155,7 @@ class Trainer(BaseTrainer):
             env_cfg.scene.terrain.max_init_terrain_level = 8
             cmd_cfg.stair_refine = True
             cmd_cfg.stair_hipx_refine = cfg.stair_hipx_weight > 0
+            cmd_cfg.stair_foothold_refine = cfg.stair_foothold_weight > 0
             cmd_cfg.stair_focus_prob = 0.65
             cmd_cfg.min_terrain_level = 4
         self.env_cfg = env_cfg

@@ -47,6 +47,8 @@ class Metrics:
         self.shank_without_foot_time = torch.zeros(4, device=device)
         self.shank_contact_events = torch.zeros(4, device=device)
         self.prev_shank_contact = torch.zeros(n, 4, dtype=torch.bool, device=device)
+        self.shank_only_since_liftoff = torch.zeros(n, 4, dtype=torch.bool, device=device)
+        self.clean_touchdowns = torch.zeros(4, device=device)
         self.max_shank_force = 0.0
         self.start_pose = torch.zeros(n, 3, device=device)
         self.start_ground = torch.zeros(n, device=device)
@@ -120,6 +122,9 @@ class Metrics:
         self.swing_count += (~contact).sum(0)
         self.max_force = max(self.max_force, float(force.norm(dim=-1).max()))
         if shank_contact is not None:
+            self.shank_only_since_liftoff |= shank_contact & ~contact
+            self.clean_touchdowns += (landed & ~self.shank_only_since_liftoff).sum(0)
+            self.shank_only_since_liftoff[landed] = False
             self.shank_contact_time += shank_contact.sum(0) * dt
             self.shank_without_foot_time += (shank_contact & ~contact).sum(0) * dt
             self.shank_contact_events += (shank_contact & ~self.prev_shank_contact
@@ -134,6 +139,7 @@ class Metrics:
         self.prev_contact[done] = False
         self.has_touch[done] = False
         self.prev_shank_contact[done] = False
+        self.shank_only_since_liftoff[done] = False
 
     def result(self):
         total = max(self.samples, 1)
@@ -159,6 +165,8 @@ class Metrics:
             "shank_contact_fraction": (self.shank_contact_time / max(self.n * self.elapsed, 1e-9)).tolist(),
             "shank_without_foot_fraction": (self.shank_without_foot_time / max(self.n * self.elapsed, 1e-9)).tolist(),
             "shank_contacts_per_second": (self.shank_contact_events / max(self.n * self.elapsed, 1e-9)).tolist(),
+            "touchdown_without_prior_shank_only_fraction":
+                (self.clean_touchdowns / self.touchdowns.clamp(min=1)).tolist(),
             "max_sampled_shank_force_N": self.max_shank_force,
             "leg_order": ["FR", "FL", "HR", "HL"],
             "duty_factor": (self.contact_time / max(self.n * self.elapsed, 1e-9)).tolist(),

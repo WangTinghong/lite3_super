@@ -17,6 +17,7 @@ class Imagination(BaseImagination):
         self.amp, self.amp_scale, self.last_amp_reward = amp, 0.0, 0.0
         self.stair_refine = cfg.weights.stair_foot_clearance != 0.0
         self.stair_hipx_refine = cfg.weights.stair_hipx_target_outward != 0.0
+        self.stair_foothold_refine = cfg.weights.stair_foothold != 0.0
         # Include command timer and speed ceiling: both affect future commands.
         self.critic_dim = st.STATE_DIM + 5 + st.CONTEXT_DIM + tr.SCAN_POINTS
         self._step_fn = torch.compile(self._step, dynamic=False) if cfg.compile else self._step
@@ -41,7 +42,8 @@ class Imagination(BaseImagination):
         next_pose = st.apply_pose_delta(pose, dp)
         terms = reward_terms(s, next_s, pose, next_pose, a, prev, commands[:, :3],
                              c, cfg.dt, self.field, stair_refine=self.stair_refine,
-                             stair_hipx_refine=self.stair_hipx_refine)
+                             stair_hipx_refine=self.stair_hipx_refine,
+                             stair_foothold_refine=self.stair_foothold_refine)
         d = self.fall_prob(next_s)
         r = (sum(getattr(cfg.weights, name) * v for name, v in terms.items())
              + cfg.weights.terminated * d) * cfg.dt

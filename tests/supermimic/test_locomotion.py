@@ -10,7 +10,7 @@ from lite3_supermimic.locomotion.config import (
 )
 from lite3_supermimic.locomotion.core import (
     TERMS, advance_commands, feet_world, foot_clearances, observation, reward_terms,
-    stair_clearance_terms, stair_hipx_target_penalty,
+    stair_clearance_terms, stair_hipx_target_penalty, stair_foothold_reward,
     sample_commands, validate_checkpoint,
 )
 from lite3_supermimic.supermimic import state as st
@@ -100,6 +100,9 @@ def test_stair_refinement_requires_harder_terrain_and_resume():
     with pytest.raises(ValueError, match="stair-hipx-weight"):
         TrainCfg(stage="terrain", harder_stairs=True, resume="model.pt",
                  stair_hipx_weight=2.0)
+    with pytest.raises(ValueError, match="stair-foothold-weight"):
+        TrainCfg(stage="terrain", harder_stairs=True, resume="model.pt",
+                 stair_foothold_weight=0.5)
 
 
 def test_stair_hipx_target_penalty_is_edge_gated_and_differentiable():
@@ -123,6 +126,24 @@ def test_stair_hipx_target_penalty_is_edge_gated_and_differentiable():
     assert weights.stair_hipx_target_outward == 0
 
 
+def test_stair_foothold_rewards_front_foot_settling_on_upper_tread():
+    x = torch.linspace(-1, 1, 101)
+    field = HeightField((x >= 0.2).float().mul(0.18).expand(101, 101).clone(),
+                        (-1., -1.), .02)
+    s, p, _, _ = inputs(1)
+    feet = s[:, st.FEET].reshape(1, 4, 3)
+    feet[:, :2, 0], feet[:, :2, 2] = 0.35, -0.05
+    command = torch.tensor([[0.5, 0., 0.]])
+    landed = stair_foothold_reward(s, s, p, p, command, field, .02)
+    hovering = s.clone()
+    hovering[:, st.FEET].reshape(1, 4, 3)[:, :2, 2] += 0.15
+    high = stair_foothold_reward(hovering, hovering, p, p, command, field, .02)
+    assert landed.item() > high.item() >= 0
+    assert stair_foothold_reward(s, s, p, p, command, None, .02).item() == 0
+    assert stair_foothold_reward(s, s, p, p, command * 0, field, .02).item() == 0
+    assert stair_refine_weights().stair_foothold == 0
+
+
 def test_eval_metrics_report_progress_and_hipx_target_limit():
     from lite3_supermimic.locomotion.metrics import Metrics
     s, p, a, _ = inputs(1)
@@ -142,6 +163,24 @@ def test_eval_metrics_report_progress_and_hipx_target_limit():
     assert result["hipx_outward_mean_rad"][0] == pytest.approx(0.51)
     assert result["hipx_pos_over_0p5_fraction"][0] == 1.0
     assert result["hipx_target_over_limit_fraction"][0] == 1.0
+
+
+def test_eval_counts_shank_before_foot_touchdown():
+    from lite3_supermimic.locomotion.metrics import Metrics
+    s, p, a, _ = inputs(1)
+    metrics = Metrics(1, "cpu")
+    command = torch.zeros(1, 3)
+    force = torch.zeros(1, 4, 3)
+    done = torch.tensor([False])
+    first = torch.tensor([[False, False, False, False]])
+    shank = torch.tensor([[True, False, False, False]])
+    metrics.update(s, p, s, p, command, a, a, first, force, done, done, .02,
+                   shank_contact=shank, shank_force=force)
+    landed = torch.tensor([[True, True, False, False]])
+    metrics.update(s, p, s, p, command, a, a, landed, force, done, done, .02,
+                   shank_contact=first, shank_force=force)
+    fractions = metrics.result()["touchdown_without_prior_shank_only_fraction"]
+    assert fractions[:2] == [0.0, 1.0]
 
 
 def test_contact_clearance_uses_each_foot_local_ground():
