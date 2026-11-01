@@ -10,7 +10,7 @@ import torch
 
 from lite3_supermimic.locomotion.config import STAGES
 from lite3_supermimic.locomotion.core import foot_clearances, validate_checkpoint
-from lite3_supermimic.locomotion.metrics import Metrics, read_contacts
+from lite3_supermimic.locomotion.metrics import Metrics, read_contacts, read_shank_contacts
 from lite3_supermimic.robot.constants import JOINT_NAMES
 from lite3_supermimic.supermimic import state as st
 from lite3_supermimic.supermimic.train import Actor
@@ -121,7 +121,8 @@ def main():
             csvwriter = csv.writer(writer)
             csvwriter.writerow(["time_s", "cmd_vx", "cmd_vy", "cmd_yaw", "vx", "vy", "yaw_rate",
                                 "terminated", "truncated"] + [f"contact_{leg}" for leg in st.LEGS]
-                               + [f"clearance_{leg}_m" for leg in st.LEGS])
+                               + [f"clearance_{leg}_m" for leg in st.LEGS]
+                               + [f"shank_contact_{leg}" for leg in st.LEGS])
         joint_csvwriter = None
         if args.joint_csv:
             robot = env.scene["robot"]
@@ -149,14 +150,17 @@ def main():
                 obs, _, terminated, truncated, _ = env.step(a)
                 s1, p1 = st.robot_state(env, term.height_field), st.planar_pose(env)
                 contact, force = read_contacts(env.scene["feet_ground_contact"])
+                shank_contact, shank_force = read_shank_contacts(env.scene["shanks_ground_contact"])
                 metrics.update(s0, p0, s1, p1, cmd, a, prev, contact, force,
-                               terminated, truncated, env.step_dt, term.height_field)
+                               terminated, truncated, env.step_dt, term.height_field,
+                               shank_contact, shank_force)
                 if csvwriter:
                     clear = foot_clearances(s1, p1, term.height_field)[0].tolist()
                     csvwriter.writerow([(i + 1) * env.step_dt] + cmd[0].tolist()
                                        + s1[0, [4, 5, 9]].tolist()
                                        + [bool(terminated[0]), bool(truncated[0])]
-                                       + contact[0].int().tolist() + clear)
+                                       + contact[0].int().tolist() + clear
+                                       + shank_contact[0].int().tolist())
                 if joint_csvwriter:
                     data = env.scene["robot"].data
                     joint_csvwriter.writerow([(i + 1) * env.step_dt, float(cmd[0, 0]),

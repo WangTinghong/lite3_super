@@ -250,12 +250,40 @@ def test_contact_metrics_reorder_xml_feet_to_state_order():
     torch.testing.assert_close(force, sensor.data.force[:, [1, 0, 3, 2]])
 
 
+def test_shank_contacts_are_measured_separately_from_foot_contacts():
+    from lite3_supermimic.locomotion.metrics import Metrics, read_shank_contacts
+    sensor = SimpleNamespace(
+        primary_names=[f"robot/{leg}_SHANK_collision" for leg in ("FL", "FR", "HL", "HR")],
+        data=SimpleNamespace(found=torch.tensor([[0, 1, 0, 0]]),
+                             force=torch.tensor([[[0., 0., 0.], [3., 4., 0.],
+                                                  [0., 0., 0.], [0., 0., 0.]]])))
+    shank_contact, shank_force = read_shank_contacts(sensor)
+    assert shank_contact.tolist() == [[True, False, False, False]]
+    s, p, a, _ = inputs(1)
+    metric = Metrics(1, "cpu")
+    foot_contact = torch.zeros(1, 4, dtype=torch.bool)
+    foot_force = torch.zeros(1, 4, 3)
+    no = torch.zeros(1, dtype=torch.bool)
+    for _ in range(2):
+        metric.update(s, p, s, p, torch.zeros(1, 3), a, a, foot_contact, foot_force,
+                      no, no, .02, shank_contact=shank_contact, shank_force=shank_force)
+    result = metric.result()
+    assert result["shank_contact_fraction"] == pytest.approx([1., 0., 0., 0.])
+    assert result["shank_without_foot_fraction"] == pytest.approx([1., 0., 0., 0.])
+    assert result["shank_contacts_per_second"] == pytest.approx([0., 0., 0., 0.])
+    assert result["max_sampled_shank_force_N"] == pytest.approx(5.)
+    assert result["max_sampled_foot_force_N"] == 0
+
+
 def test_locomotion_collision_exposes_foot_without_modifying_shared_xml():
     mujoco = pytest.importorskip("mujoco")
     from lite3_supermimic.locomotion.env import make_env_cfg
     from lite3_supermimic.robot.lite3 import get_spec
     original = get_spec()
     specific = make_env_cfg("flat").scene.entities["robot"].spec_fn()
+    sensors = {sensor.name for sensor in make_env_cfg("terrain").scene.sensors}
+    assert "feet_ground_contact" in sensors
+    assert "shanks_ground_contact" in sensors
     for leg in ("FR", "FL", "HR", "HL"):
         old = original.geom(f"{leg}_SHANK_collision")
         new = specific.geom(f"{leg}_SHANK_collision")

@@ -10,10 +10,12 @@ from mjlab.managers import CurriculumTermCfg, TerminationTermCfg
 from mjlab.managers.command_manager import CommandTerm, CommandTermCfg
 from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
+from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.tasks.velocity import mdp
 from mjlab.utils.noise import UniformNoiseCfg
 
 from lite3_supermimic.env.env_cfg import lite3_chase_env_cfg
+from lite3_supermimic.robot.constants import SHANK_GEOM_NAMES
 from lite3_supermimic.supermimic import state as st
 from lite3_supermimic.target import terrain as tr
 from .config import HISTORY, STAGES, TASKS, WEIGHTS
@@ -205,6 +207,15 @@ def make_env_cfg(stage="flat", play=False, harder_stairs=False):
         return model_spec
 
     robot_cfg.spec_fn = locomotion_spec
+    # A foot-only sensor misses stair climbing by pushing the riser with the
+    # shank. Keep this diagnostic separate from policy observations and the
+    # differentiable world-model reward.
+    cfg.scene.sensors += (ContactSensorCfg(
+        name="shanks_ground_contact",
+        primary=ContactMatch(mode="geom", pattern=SHANK_GEOM_NAMES, entity="robot"),
+        secondary=ContactMatch(mode="body", pattern="terrain"),
+        fields=("found", "force"), reduce="netforce", num_slots=1,
+    ),)
     cfg.commands = {"velocity": VelocityCommandCfg(
         stage=stage, resampling_time_range=spec.interval, debug_vis=True)}
     actor = cfg.observations["actor"]
