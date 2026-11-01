@@ -39,7 +39,7 @@ python scripts/train_locomotion.py --stage terrain --harder-stairs --stair-refin
 python scripts/train_locomotion.py --stage terrain --harder-stairs --stair-refine \
   --resume "$SOURCE" --amp-motion-dir "$MOTIONS" --gait-anchor-weight 0.2 \
   --num-envs 2048 --iterations 4000 --warmup-iterations 500 \
-  --actor-lr-scale 0.2 --save-interval 500 \
+  --speed-curriculum-iterations 2500 --actor-lr-scale 0.2 --save-interval 500 \
   --run-name stair_ascent_refine --log-interval 10
 ```
 
