@@ -37,6 +37,7 @@ def main():
     parser.add_argument("--gait-csv", help="Env 0 contact/clearance/velocity timeline")
     parser.add_argument("--joint-csv", help="Env 0 joint position/target/velocity/actuator torque timeline")
     parser.add_argument("--wm-audit", action="store_true", help="Read-only one/5-step WM errors near stair risers")
+    parser.add_argument("--contact-data", help="New empty directory for offline contact WM transitions and terrain audit")
     parser.add_argument("--probe-fr-hipy", type=float, default=0.0, help="Evaluation-only FR HipY target offset in radians, max magnitude 0.15")
     parser.add_argument("--probe-fr-knee", type=float, default=0.0, help="Evaluation-only FR Knee target offset in radians, max magnitude 0.15")
     args = parser.parse_args()
@@ -49,6 +50,10 @@ def main():
         parser.error("Choose --viewer or --video for one run")
     if args.viewer and args.wm_audit:
         parser.error("--wm-audit requires a quantitative run without --viewer")
+    if args.contact_data and (args.viewer or args.video or probe_on or args.random_commands):
+        parser.error("--contact-data requires fixed-command quantitative baseline evaluation")
+    if args.contact_data and Path(args.contact_data).exists() and any(Path(args.contact_data).iterdir()):
+        parser.error("--contact-data must be a new/empty directory; existing data is never overwritten")
     if args.keyboard and not args.viewer:
         parser.error("--keyboard requires --viewer")
     if args.keyboard and args.random_commands:
@@ -88,6 +93,8 @@ def main():
     cfg.viewer.entity_name = "robot"
     cfg.viewer.distance, cfg.viewer.elevation = 3.2, -20.0
     cfg.viewer.width, cfg.viewer.height = 1280, 720
+    if args.contact_data:
+        print("Initializing physics and cached heightfield; collection starts after managers load.", flush=True)
     env = ManagerBasedRlEnv(cfg, device=args.device, render_mode="rgb_array" if args.video else None)
     writer = joint_writer = video = None
     try:
@@ -115,7 +122,39 @@ def main():
             probe_stats["active"] += int((gate > 0).sum())
             probe_stats["gate_sum"] += float(gate.sum())
             return action
-        wm_audit = ctx = None
+        wm_audit = ctx = recorder = geometry = None
+        if args.wm_audit or args.contact_data:
+            ctx = st.ContextReader(env)
+            base_id = int(ctx.base_body)
+            ctx.base_ipos0 = torch.as_tensor(env.sim.mj_model.body_ipos[base_id].copy(),
+                                            dtype=torch.float32, device=env.device).expand(env.num_envs, 3)
+        if args.contact_data:
+            from lite3_supermimic.locomotion.contact_data import ContactRecorder, file_hash
+            from lite3_supermimic.locomotion.terrain_audit import TerrainAudit
+            from lite3_supermimic.locomotion.wm_audit import WorldModelAudit
+            from lite3_supermimic.target import terrain as tr
+            from importlib.metadata import version, PackageNotFoundError
+            versions = {}
+            for package in ("torch", "mjlab", "mujoco", "mujoco-warp", "warp-lang"):
+                try:
+                    versions[package] = version(package)
+                except PackageNotFoundError:
+                    versions[package] = "unknown"
+            term = env.command_manager.get_term("velocity")
+            recorder = ContactRecorder(args.contact_data, {
+                "checkpoint": str(Path(args.checkpoint).resolve()),
+                "checkpoint_sha256": file_hash(args.checkpoint), "seed": args.seed,
+                "stage": stage, "terrain": args.terrain, "terrain_level": args.terrain_level,
+                "command": cmd_cfg.fixed_command, "dt": env.step_dt,
+                "field_res_m": term.height_field.res if term.height_field else None,
+                "num_envs": env.num_envs, "seconds": args.seconds,
+                "versions": versions,
+                "contact_timing": "post-step, before manual reset",
+            })
+            if term.height_field is not None:
+                term.height_field.save(str(Path(args.contact_data) / "field.pt"))
+            geometry = TerrainAudit(env)
+            print("Collecting contact transitions; progress every 250 simulation steps.", flush=True)
         if args.wm_audit:
             from lite3_supermimic.locomotion.wm_audit import WorldModelAudit
             from lite3_supermimic.supermimic.world_model import WorldModel
@@ -124,10 +163,6 @@ def main():
             wm = WorldModel(tuple(ckpt["cfg"]["wm_hidden"])).to(env.device)
             wm.load_state_dict(ckpt["world_model"])
             wm.eval()
-            ctx = st.ContextReader(env)
-            base_id = int(ctx.base_body)
-            ctx.base_ipos0 = torch.as_tensor(env.sim.mj_model.body_ipos[base_id].copy(),
-                                            dtype=torch.float32, device=env.device).expand(env.num_envs, 3)
             wm_audit = WorldModelAudit(wm, env.num_envs, env.device)
         if args.viewer:
             from mjlab.viewer import NativeMujocoViewer
@@ -189,10 +224,23 @@ def main():
                 cmd = term.command.clone()
                 a = get_action(obs, s0, p0, cmd)
                 xi = ctx.read() if ctx is not None else None
+                if recorder is not None:
+                    contact0 = torch.cat((read_contacts(env.scene["feet_ground_contact"])[0],
+                                          read_shank_contacts(env.scene["shanks_ground_contact"])[0]), -1).clone()
+                    relief0 = tr.relief(p0[:, :2], p0[:, 2], term.height_field)
+                    near = WorldModelAudit.near_riser(s0, p0, term.height_field)
+                    if i % 25 == 0:
+                        geometry.update(s0, p0, term.height_field)
                 obs, _, terminated, truncated, _ = env.step(a)
                 s1, p1 = st.robot_state(env, term.height_field), st.planar_pose(env)
                 contact, force = read_contacts(env.scene["feet_ground_contact"])
                 shank_contact, shank_force = read_shank_contacts(env.scene["shanks_ground_contact"])
+                if recorder is not None:
+                    recorder.add(s0=s0, s1=s1, pose0=p0, pose1=p1, action=a,
+                                 prev=prev, context=xi, relief=relief0,
+                                 delta=st.pose_delta(p0, p1), contact0=contact0,
+                                 contact=torch.cat((contact, shank_contact), -1),
+                                 done=terminated | truncated, near=near)
                 metrics.update(s0, p0, s1, p1, cmd, a, prev, contact, force,
                                terminated, truncated, env.step_dt, term.height_field,
                                shank_contact, shank_force)
@@ -229,6 +277,9 @@ def main():
                   "num_envs": env.num_envs, **metrics.result()}
         if wm_audit is not None:
             result["world_model_audit"] = wm_audit.result()
+        if recorder is not None:
+            result["terrain_audit"] = geometry.result()
+            recorder.finish(result["terrain_audit"])
         result["action_probe"] = {
             "enabled": probe_on, "fr_hipy_delta_rad": args.probe_fr_hipy,
             "fr_knee_delta_rad": args.probe_fr_knee,
