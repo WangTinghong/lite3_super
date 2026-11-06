@@ -60,6 +60,32 @@ class ContactPhaseTests(unittest.TestCase):
         self.assertEqual(report['cached_vs_original_arange']['samples'], 0)
         self.assertEqual(report['cached_vs_original_builder_zero_fallback']['samples'], 2)
 
+    def test_terrain_reencoding_and_ray_retry(self):
+        from lite3_supermimic.locomotion.terrain_reencode import reencode_chunk, build_diagnostic_grid
+        from lite3_supermimic.target.terrain import HeightField
+        old = HeightField(torch.zeros(40,40), (-1.,-1.), .1)
+        new = HeightField(torch.full((40,40), .18), (-1.,-1.), .1)
+        state = torch.randn(2,3,70)
+        chunk = dict(s0=state, s1=state.clone(), pose0=torch.zeros(2,3,3), pose1=torch.zeros(2,3,3),
+                     action=torch.zeros(2,3,12), contact=torch.zeros(2,3,8,dtype=torch.bool), relief=torch.zeros(2,3,77))
+        converted = reencode_chunk(chunk,old,new)
+        torch.testing.assert_close(converted['s0'][...,0]+.18, state[...,0])
+        torch.testing.assert_close(converted['s0'][...,1:],state[...,1:])
+        self.assertIs(converted['action'],chunk['action'])
+        self.assertIs(converted['contact'],chunk['contact'])
+        torch.testing.assert_close(converted['relief'],torch.zeros_like(converted['relief']))
+        calls = [0]
+        def ray(xy):
+            calls[0] += 1
+            return np.full(len(xy), np.nan if calls[0]==1 else .18)
+        field, report = build_diagnostic_grid((0.,0.,.04,.04),.02,ray)
+        self.assertGreater(report['no_hit_nodes_retried'],0)
+        torch.testing.assert_close(field.h,torch.full_like(field.h,.18))
+        with self.assertRaisesRegex(ValueError,'Unresolved'):
+            build_diagnostic_grid((0.,0.,.04,.04),.02,lambda xy:np.full(len(xy),np.nan))
+        with self.assertRaisesRegex(ValueError,'oversized'):
+            build_diagnostic_grid((0.,0.,100.,100.),.02,ray,max_nodes=100)
+
     def test_probability_ranking_and_ties(self):
         truth = torch.tensor([True, False, True, False])
         tied = probability_diagnostics(torch.ones(4) * .1, truth)
@@ -150,7 +176,9 @@ class ContactPhaseTests(unittest.TestCase):
                             world_model=WorldModel((16, 16)).state_dict()), source)
             digest = file_hash(source)
             for seed in (0, 1, 2, 3):
-                r = ContactRecorder(root / str(seed), dict(seed=seed, checkpoint_sha256=digest))
+                r = ContactRecorder(root / str(seed), dict(seed=seed, checkpoint_sha256=digest,
+                    stage='terrain', terrain='stairs_inv', terrain_level=8, command=[1.,0.,0.], dt=.02,
+                    num_envs=3, seconds=.16))
                 HeightField(torch.zeros(80, 80), (-3., -3.), .1).save(str(root / str(seed) / "field.pt"))
                 for _ in range(8):
                     state = torch.randn(3, 70) * .01
@@ -193,6 +221,37 @@ class ContactPhaseTests(unittest.TestCase):
             self.assertEqual(file_hash(artifact), artifact_hash)
             refined_path = root / "head/contact_world_model.pt"
             refined_hash = file_hash(refined_path)
+            # Run both ablation arms end to end on a physically identical synthetic dataset.
+            from lite3_supermimic.locomotion.terrain_reencode import reencode_chunk
+            import shutil
+            for split, seed in zip(('train','validation','test'), (0,1,2)):
+                old_dir = root/'coarse'/split/'up8_v10'
+                old_dir.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(root/str(seed),old_dir)
+                fine_dir = root/'fine'/split/'up8_v10'
+                fine_dir.mkdir(parents=True)
+                old_field = HeightField.load(str(old_dir/'field.pt'),'cpu')
+                fine_field = HeightField(old_field.h + .04, old_field.origin, old_field.res)
+                fine_field.save(str(fine_dir/'field.pt'))
+                manifest = json.loads((old_dir/'manifest.json').read_text())
+                hashes = {}
+                for filename in manifest['files']:
+                    chunk = torch.load(old_dir/filename,weights_only=True)
+                    torch.save(reencode_chunk(chunk,old_field,fine_field),fine_dir/filename)
+                    hashes[filename] = file_hash(old_dir/filename)
+                manifest['representation_change'] = dict(source_directory=str(old_dir),
+                    source_manifest_sha256=file_hash(old_dir/'manifest.json'),source_chunks_sha256=hashes)
+                (fine_dir/'manifest.json').write_text(json.dumps(manifest))
+            ablation = script.parent/'fit_terrain_ablation.py'
+            argv = [str(ablation),'--source',str(refined_path),'--old-root',str(root/'coarse'),
+                    '--fine-root',str(root/'fine'),'--output-dir',str(root/'ablation'),
+                    '--updates','2','--batch','8','--eval-windows','12','--eval-interval','1','--device','cpu']
+            with patch.object(sys,'argv',argv): runpy.run_path(str(ablation),run_name='__main__')
+            summary = json.loads((root/'ablation/summary.json').read_text())
+            self.assertFalse(summary['actor_updated'])
+            self.assertIn('base_world_z_rmse',summary['comparison']['step_5']['fine'])
+            self.assertEqual(file_hash(refined_path),refined_hash)
+
             argv = [str(audit), "--model", str(refined_path), "--fresh-data", str(root / "3"),
                     "--output", str(root / "fresh.json"), "--device", "cpu"]
             with patch.object(sys, "argv", argv):

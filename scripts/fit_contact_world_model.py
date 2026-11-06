@@ -40,7 +40,11 @@ def evaluate(model, dataset, ids, device, batch_size=512):
                 near = b["near"][:, 0]
                 event = (b["contact"][:, j] != b["contact0"][:, j]).any(-1)
                 shank = (b["contact"][:, j, 4:] & ~b["contact"][:, j, :4]).any(-1)
+                world_base_error = (s[:, 0] + dataset.ground_at(selection, pose, device)
+                                    - b["s1"][:, j, 0] - dataset.ground_at(selection, b["pose1"][:, j], device))
                 values = {
+                    "base_world_z_sq": world_base_error.square(),
+                    "foot_world_z_sq": (foot[..., 2] + world_base_error[:, None]).square().mean(-1),
                     "normalized_mse": (error / scale).square().mean(-1),
                     "vx_sq": (s[:, 4] - b["s1"][:, j, 4]).square(),
                     "yaw_rate_sq": (s[:, 9] - b["s1"][:, j, 9]).square(),
@@ -64,7 +68,7 @@ def evaluate(model, dataset, ids, device, batch_size=512):
             group = {"samples": count}
             if count:
                 group["normalized_mse"] = float(data["normalized_mse"][mask].mean())
-                for key in ("vx_sq", "yaw_rate_sq", "foot_relative_z_sq", "base_xy_sq"):
+                for key in ("vx_sq", "yaw_rate_sq", "foot_relative_z_sq", "base_xy_sq", "base_world_z_sq", "foot_world_z_sq"):
                     group[key.replace("_sq", "_rmse")] = float(data[key][mask].mean().sqrt())
                 if "prob" in data:
                     group["bce"] = float(data["bce"][mask].mean())

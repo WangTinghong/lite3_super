@@ -210,3 +210,55 @@ ray-miss sensitivity. `nodes.csv` records those checks. The explicit
 zero fill solely to diagnose cache agreement; zero fill is not ground truth.
 Run to a new output directory, for example `audit/terrain_geometry_up8_seed3_v2`.
 No policy, height-map cache, model or physics setting is changed by this audit.
+
+## Paired 2 cm offline pilot (high-stair scene only)
+
+After geometry audit v2, prepare a *separate* representation of the existing
+train/validation/test `up8_v10` trajectories (seeds 0/1/2). No new actor rollout
+is required; the original files and the actor's 10 cm observations are retained.
+
+```bash
+python scripts/prepare_terrain_ablation.py --checkpoint "$BASE"
+```
+
+Each split reconstructs its physical terrain with matching software versions,
+then ray-casts a cropped 2 cm grid enclosing its recorded poses with a 2 m
+margin. This is CPU ray work and can be slow despite low GPU utilization;
+progress prints every 100 grid rows. The grid is limited to five million nodes.
+A fixed +1 micrometre origin shift defines edge sampling. Missing rays retry
++x,+y,-x,-y by 1 micrometre, and unresolved misses fail instead of filling zero.
+This changes both resolution and boundary sampling, not resolution alone.
+The fine grid is saved only inside `audit/terrain_2cm_pilot/data`.
+
+Conversion updates both s0/s1 base height using
+`z_new = z_old + old_ground(base_xy) - new_ground(base_xy)` and recomputes relief.
+World height, body-relative limb coordinates, velocities, actions, context,
+contact labels, terminal flags and original near-riser grouping are preserved.
+Completed output manifests contain source hashes and transformation metadata.
+Outputs must be empty; preserve partial output and use a new output directory
+if preparation is interrupted.
+
+Run the matched-budget pilot:
+
+```bash
+python scripts/fit_terrain_ablation.py --updates 500
+```
+
+Both arms start with the same refined contact-world-model weights and frozen
+normalization, use identical uniform window IDs, Adam learning rate 1e-5 and
+five-step predicted-pose rollouts. Validation selects independently using
+normalized MSE + 0.2 BCE and includes the unchanged initial model. Test is never
+used to select an update. The test set is repeated regression data, not a new
+claim of generalization. Cropped terrain queries outside the grid fail explicitly.
+
+The report includes world-frame base/foot height RMSE to avoid mistaking a
+change of height reference for a physical improvement. Other physical velocity
+and contact metrics must also be checked, not just normalized MSE. The two
+saved models use a distinct offline schema and cannot be resumed as actors.
+No AMP/actor training, reward change or controller update occurs here. General
+terrain regression, fresh-seed evaluation, and action-response validation must
+precede policy optimization. This pilot cannot establish gait improvement.
+
+CPU tests cover re-encoding physical invariance, missing-ray handling, grid
+size bounds, and a synthetic end-to-end two-arm fit. GPU/mjlab terrain building
+requires execution on the server.

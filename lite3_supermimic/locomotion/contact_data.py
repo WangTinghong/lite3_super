@@ -114,6 +114,18 @@ class ContactDataset:
                 result[key][mask] = selected
         return {key: value.to(device) for key, value in result.items()}
 
+    def ground_at(self, ids, pose, device):
+        from lite3_supermimic.target import terrain as tr
+        rows = self.index[ids]
+        output = torch.empty(len(rows), device=device)
+        for cid in rows[:, 0].unique().tolist():
+            mask = (rows[:, 0] == cid).to(device)
+            field = self.fields[cid]
+            if field is not None and field.h.device != pose.device:
+                field.h = field.h.to(device)
+            output[mask] = tr.ground(pose[mask, :2], field)
+        return output
+
     def relief_at(self, ids, pose, device):
         from lite3_supermimic.target import terrain as tr
         rows = self.index[ids]
