@@ -43,6 +43,13 @@ does not yet establish the correctness of policy gradients through that head.
 A matched-state MuJoCo action-response/gradient audit and actual policy update
 remain subsequent validation steps; this branch does not claim those pass.
 
+If recall at threshold 0.5 is near zero, reuse the saved model/data without any
+updates: `python scripts/audit_contact_probabilities.py`. This writes
+`audit/contact_phase1/fit/probability_audit.json` with average precision (tied
+scores grouped), prevalence, positive/negative score distributions, and Brier
+comparison against a constant-prevalence predictor. It reuses the original
+validation/test window selections and does not tune thresholds on the test set.
+
 ## Server workflow
 
 Use the existing `lite3_supermimic` Python 3.12 environment. The wrapper adds

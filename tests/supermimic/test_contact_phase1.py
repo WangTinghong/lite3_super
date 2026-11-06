@@ -12,11 +12,19 @@ from pathlib import Path
 import torch
 
 from lite3_supermimic.locomotion.contact_data import ContactRecorder, ContactDataset, check_splits, window_starts, file_hash
-from lite3_supermimic.locomotion.contact_model import ContactWorldModel, labels, classification_metrics
+from lite3_supermimic.locomotion.contact_model import ContactWorldModel, labels, classification_metrics, probability_diagnostics
 from lite3_supermimic.supermimic.world_model import WorldModel
 
 
 class ContactPhaseTests(unittest.TestCase):
+    def test_probability_ranking_and_ties(self):
+        truth = torch.tensor([True, False, True, False])
+        tied = probability_diagnostics(torch.ones(4) * .1, truth)
+        self.assertEqual(tied["average_precision"], .5)
+        perfect = probability_diagnostics(torch.tensor([.3, .1, .2, .05]), truth)
+        self.assertEqual(perfect["average_precision"], 1.0)
+        self.assertEqual(classification_metrics(torch.zeros(4, 12), torch.zeros(4, 12))["foot_FR"]["average_precision"], None)
+
     def test_geometry_ray_misses_and_group_restoration(self):
         from lite3_supermimic.locomotion.terrain_audit import TerrainAudit
         from lite3_supermimic.target.terrain import HeightField
@@ -121,6 +129,14 @@ class ContactPhaseTests(unittest.TestCase):
             self.assertFalse(report["actor_updated"])
             self.assertEqual(file_hash(source), digest)
             self.assertEqual(report["contact_model_test"]["step_5"]["all"]["contacts"]["shank_only_FR"]["samples"], 12)
+            artifact = root / "fit/contact_world_model.pt"
+            artifact_hash = file_hash(artifact)
+            audit = script.parent / "audit_contact_probabilities.py"
+            argv = [str(audit), "--model", str(artifact), "--output", str(root / "audit.json"), "--device", "cpu"]
+            with patch.object(sys, "argv", argv):
+                runpy.run_path(str(audit), run_name="__main__")
+            self.assertEqual(file_hash(artifact), artifact_hash)
+            self.assertFalse(json.loads((root / "audit.json").read_text())["model_updated"])
 
 
 if __name__ == "__main__":

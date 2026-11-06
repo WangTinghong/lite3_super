@@ -38,6 +38,26 @@ def labels(contact):
     return torch.cat((contact, contact[..., 4:] & ~contact[..., :4]), -1).float()
 
 
+def probability_diagnostics(prob, truth):
+    """Threshold-free AP with tied scores grouped, plus calibration diagnostics."""
+    order = prob.argsort(descending=True)
+    score, y = prob[order], truth[order].double()
+    ends = torch.cat(((score[:-1] != score[1:]).nonzero().flatten(),
+                      torch.tensor([len(score) - 1], device=score.device)))
+    tp = y.cumsum(0)[ends]
+    precision = tp / (ends + 1)
+    positive_count = int(truth.sum())
+    ap = float((precision * torch.diff(tp, prepend=tp.new_zeros(1))).sum() / positive_count) if positive_count else None
+    def distribution(mask):
+        v = prob[mask]
+        return dict(count=len(v), mean=float(v.mean()),
+                    q10_q50_q90=[float(x) for x in v.quantile(v.new_tensor([.1, .5, .9]))]) if len(v) else dict(count=0)
+    prevalence = float(truth.float().mean())
+    return dict(average_precision=ap, prevalence=prevalence,
+                constant_prevalence_brier=prevalence * (1 - prevalence),
+                positive_probability=distribution(truth), negative_probability=distribution(~truth))
+
+
 def classification_metrics(prob, target):
     pred, truth = prob >= .5, target.bool()
     tp = (pred & truth).sum(0).double()
@@ -51,5 +71,6 @@ def classification_metrics(prob, target):
                        precision=ratio(tp[i], tp[i] + fp[i]),
                        recall=ratio(tp[i], tp[i] + fn[i]),
                        false_positive_rate=ratio(fp[i], (~truth[:, i]).sum()),
-                       brier=float((prob[:, i] - target[:, i]).square().mean()))
+                       brier=float((prob[:, i] - target[:, i]).square().mean()),
+                       **probability_diagnostics(prob[:, i], truth[:, i]))
             for i, name in enumerate(names)}
