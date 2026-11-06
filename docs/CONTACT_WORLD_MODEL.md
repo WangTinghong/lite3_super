@@ -170,3 +170,31 @@ Fresh-seed performance is a replication within these scenarios, not proof of
 unseen-terrain generalization or correct action gradients. If it holds up,
 inspect geometry errors and validate predicted responses to action changes
 against simulation before using the contact model to optimize the actor.
+
+## Locate geometry errors before changing terrain inputs
+
+Use a completed fresh-seed high-stair collection. This reconstructs the physical
+terrain from its source checkpoint/configuration and samples recorded robot
+states; it does not roll out or train a policy:
+
+```bash
+python scripts/audit_terrain_samples.py --checkpoint "$BASE" \
+  --data audit/contact_holdout_seed3/data/holdout/up8_v10 \
+  --output-dir audit/terrain_geometry_up8_seed3
+```
+
+Default: 128 recorded robot states, four feet, four path offsets per foot
+(0/5/12/25 cm). `summary.json` reports signed/absolute height errors for the
+existing cached map and hypothetical ray-cast grids at the original resolution,
+5 cm and 2 cm. `samples.csv` preserves coordinates and chunk/time/environment
+indices. It checks cached grid nodes against reconstructed physical geometry;
+a mismatch must be investigated before blaming interpolation. The finer grids
+are diagnostic only and never replace any policy observation or world-model
+input. They need not improve every sampled edge. Full-map memory/runtime costs,
+new observation distributions and action gradients are not validated here.
+
+Matching source checkpoint hash and mjlab/MuJoCo/mujoco-warp versions are
+required. Geometry reconstruction also relies on the current terrain config;
+node mismatch can expose changed configuration or cache inconsistencies.
+CPU tests cover planar interpolation, step-edge smearing and missing ray hits.
+The native GPU environment must still be tested on the training server.

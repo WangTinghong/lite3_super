@@ -17,6 +17,25 @@ from lite3_supermimic.supermimic.world_model import WorldModel
 
 
 class ContactPhaseTests(unittest.TestCase):
+    def test_geometry_grid_reconstruction(self):
+        from lite3_supermimic.locomotion.geometry_compare import ray_grid_interpolate, error_stats
+        points = np.array([[.013, .017], [-.029, .035], [.105, -.04]])
+        plane = lambda xy: xy[:, 0] * .3 + xy[:, 1] * .2 + .7
+        for resolution in (.1, .05, .02):
+            values, _, _ = ray_grid_interpolate(points, (-.5, -.5), resolution, plane)
+            np.testing.assert_allclose(values, plane(points), atol=1e-12)
+        # A vertical step inside a coarse cell is smeared; finer cells can recover it.
+        step = lambda xy: np.where(xy[:, 0] >= .05, .18, 0.)
+        point = np.array([[.075, .013]])
+        coarse, _, _ = ray_grid_interpolate(point, (0., 0.), .1, step)
+        fine, _, _ = ray_grid_interpolate(point, (0., 0.), .02, step)
+        self.assertGreater(abs(coarse[0] - .18), .04)
+        self.assertAlmostEqual(fine[0], .18)
+        stats = error_stats(np.array([0., .2, np.nan]), np.array([.1, .1, .1]))
+        self.assertEqual(stats['invalid'], 1)
+        self.assertEqual(stats['underestimate_over_5cm_fraction'], .5)
+        self.assertEqual(stats['overestimate_over_5cm_fraction'], .5)
+
     def test_probability_ranking_and_ties(self):
         truth = torch.tensor([True, False, True, False])
         tied = probability_diagnostics(torch.ones(4) * .1, truth)
