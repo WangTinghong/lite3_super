@@ -198,3 +198,15 @@ required. Geometry reconstruction also relies on the current terrain config;
 node mismatch can expose changed configuration or cache inconsistencies.
 CPU tests cover planar interpolation, step-edge smearing and missing ray hits.
 The native GPU environment must still be tested on the training server.
+
+Geometry audit version 2 corrects the comparison protocol: `common_support`
+uses the same finite query points for every resolution. Per-method statistics
+remain available but cannot alone establish improvement when missingness differs.
+`cached_node_checks` counts unique nodes and reconstructs the original builder's
+`np.arange` coordinates, compares nominal origin+index*resolution coordinates,
+and probes +/-1 micrometre in eight directions to identify discontinuity or
+ray-miss sensitivity. `nodes.csv` records those checks. The explicit
+`original_builder_zero_fallback` statistic reproduces the historical no-ray-hit
+zero fill solely to diagnose cache agreement; zero fill is not ground truth.
+Run to a new output directory, for example `audit/terrain_geometry_up8_seed3_v2`.
+No policy, height-map cache, model or physics setting is changed by this audit.

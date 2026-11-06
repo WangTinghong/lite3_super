@@ -36,7 +36,7 @@ def main():
     from importlib.metadata import version
     from lite3_supermimic.locomotion.contact_data import ContactDataset, file_hash
     from lite3_supermimic.locomotion.core import feet_world, validate_checkpoint
-    from lite3_supermimic.locomotion.geometry_compare import ray_grid_interpolate, error_stats
+    from lite3_supermimic.locomotion.geometry_compare import ray_grid_interpolate, error_stats, common_support_comparison, cached_node_audit
     from lite3_supermimic.locomotion.env import make_env_cfg
     from lite3_supermimic.target.terrain import HeightField
     from mjlab.envs import ManagerBasedRlEnv
@@ -98,18 +98,14 @@ def main():
         try:
             exact = ray_heights(points)
             predictions = {'cached_grid': cached}
-            corner_stats = None
             for resolution in (field.res, .05, .02):
                 print(f'Auditing grid {resolution:g} m at {len(points)} path points', flush=True)
                 values, corners, heights = ray_grid_interpolate(points, field.origin, resolution, ray_heights)
                 predictions[f'raycast_grid_{resolution:g}m'] = values
                 if resolution == field.res:
-                    gx = np.rint((corners[..., 0] - field.origin[0]) / field.res).astype(int)
-                    gy = np.rint((corners[..., 1] - field.origin[1]) / field.res).astype(int)
-                    valid = (gx >= 0) & (gx < field.h.shape[1]) & (gy >= 0) & (gy < field.h.shape[0])
-                    stored = np.full(heights.shape, np.nan)
-                    stored[valid] = field.h.numpy()[gy[valid], gx[valid]]
-                    corner_stats = error_stats(stored.ravel(), heights.ravel())
+                    original_corners = corners
+            print('Checking unique cached nodes and +/-1 micrometre edge sensitivity', flush=True)
+            node_report, node_rows = cached_node_audit(field, original_corners, ray_heights)
         finally:
             model.geom_group[:] = saved
         paths = exact.reshape(-1, 4)
@@ -121,11 +117,12 @@ def main():
         result = dict(points_outside_cached_grid=int(outside.sum()), actor_updated=False, model_updated=False, policy_inputs_changed=False,
                       checkpoint_sha256=meta['checkpoint_sha256'], collection=meta,
                       sampled_states=len(ids), grid_origin=field.origin, grid_resolution_m=field.res,
-                      cached_node_vs_reconstructed_geometry=corner_stats,
+                      audit_version=2, cached_node_checks=node_report,
+                      common_support=common_support_comparison(predictions, exact, edge),
                       comparison={name: {'all': error_stats(v, exact),
                                          'edge_paths': error_stats(v[edge], exact[edge])}
                                   for name, v in predictions.items()},
-                      note='Hypothetical finer grids only, never installed. Node mismatch may indicate geometry reconstruction/cache mismatch; inspect before attributing errors to interpolation.')
+                      note='Use common_support for grid comparisons. Node checks reproduce original arange coordinates and audit edge sensitivity. No-hit zero fill is only an explicitly labelled builder-compatibility check, not ground truth. No grid is installed.')
         dest.mkdir(parents=True, exist_ok=True)
         with (dest / 'samples.csv').open('w', newline='') as f:
             writer = csv.writer(f)
@@ -136,6 +133,8 @@ def main():
                 writer.writerow([sample, *ds.index[ids[sample]].tolist(), ('FR','FL','HR','HL')[leg],
                                  float(offsets[offset]), x, y, exact[i], bool(edge[i]),
                                  *[v[i] for v in predictions.values()]])
+        np.savetxt(dest / 'nodes.csv', node_rows, delimiter=',', comments='',
+                   header='grid_x,grid_y,original_x,original_y,cached_z,nominal_ray_z,original_ray_z,neighbor_height_span,edge_sensitive_or_missing')
         (dest / 'summary.json').write_text(json.dumps(result, indent=2) + '\n')
         print(json.dumps(result, indent=2), flush=True)
         print(f'Saved {dest / "summary.json"} and samples.csv', flush=True)

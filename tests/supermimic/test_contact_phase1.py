@@ -36,6 +36,30 @@ class ContactPhaseTests(unittest.TestCase):
         self.assertEqual(stats['underestimate_over_5cm_fraction'], .5)
         self.assertEqual(stats['overestimate_over_5cm_fraction'], .5)
 
+    def test_geometry_common_support_and_original_nodes(self):
+        from lite3_supermimic.locomotion.geometry_compare import common_support_comparison, cached_node_audit
+        from lite3_supermimic.target.terrain import HeightField
+        result = common_support_comparison({'a': np.array([0., 1., np.nan]),
+                                            'b': np.array([0., np.nan, 3.])},
+                                           np.array([0., 1., 3.]), np.array([True, True, False]))
+        self.assertEqual(result['common_valid_points'], 1)
+        self.assertEqual(result['methods']['a']['all']['samples'], result['methods']['b']['all']['samples'])
+        field = HeightField(torch.ones(5, 600), (-54.5, -6.5), .1)
+        corners = np.array([[[-54.5, -6.5], [-4.5, -6.4]]])
+        oracle = lambda xy: np.ones(len(xy))
+        report, rows = cached_node_audit(field, corners, oracle)
+        self.assertEqual(report['stable_nodes'], 2)
+        self.assertEqual(report['cached_vs_original_arange']['mae_m'], 0.)
+        self.assertEqual(rows[1, 2], np.arange(-54.5, 5.5, .1)[500])
+        step = lambda xy: np.where(xy[:, 0] < -4.5, 0., .18)
+        report, _ = cached_node_audit(field, corners, step)
+        self.assertEqual(report['edge_sensitive_or_missing_nodes'], 1)
+        missing = lambda xy: np.full(len(xy), np.nan)
+        report, _ = cached_node_audit(field, corners, missing)
+        self.assertEqual(report['original_arange_no_hits'], 2)
+        self.assertEqual(report['cached_vs_original_arange']['samples'], 0)
+        self.assertEqual(report['cached_vs_original_builder_zero_fallback']['samples'], 2)
+
     def test_probability_ranking_and_ties(self):
         truth = torch.tensor([True, False, True, False])
         tied = probability_diagnostics(torch.ones(4) * .1, truth)
