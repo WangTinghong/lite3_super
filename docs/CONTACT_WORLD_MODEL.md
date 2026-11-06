@@ -50,6 +50,20 @@ scores grouped), prevalence, positive/negative score distributions, and Brier
 comparison against a constant-prevalence predictor. It reuses the original
 validation/test window selections and does not tune thresholds on the test set.
 
+If probability ranking is weak, run `python scripts/refine_contact_head.py`.
+This uses the existing offline artifact and datasets: only its linear contact
+head is optimized (default LR 1e-3, 2000 updates), while every dynamics weight
+and normalization buffer is frozen and checked bit-for-bit. Uniform training
+windows and unweighted BCE avoid treating class-weighted scores as calibrated
+probabilities. Training uses predicted pose and resampled terrain, including
+multi-step prediction error, matching validation. Selection maximizes validation
+mean AP over the four shank-only heads and one/five-step horizons; update 0 is
+retained if none improve. Results go to `audit/contact_phase1/head_refine`.
+Threshold remains 0.5. This tests whether a separately optimized head can read
+the frozen features; failure may require new features/model structure, not
+further arbitrary threshold changes. The test seed is now a repeated regression
+set; use fresh data before claiming final generalization or training the actor.
+
 ## Server workflow
 
 Use the existing `lite3_supermimic` Python 3.12 environment. The wrapper adds

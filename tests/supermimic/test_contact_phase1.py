@@ -137,6 +137,17 @@ class ContactPhaseTests(unittest.TestCase):
                 runpy.run_path(str(audit), run_name="__main__")
             self.assertEqual(file_hash(artifact), artifact_hash)
             self.assertFalse(json.loads((root / "audit.json").read_text())["model_updated"])
+            refine = script.parent / "refine_contact_head.py"
+            argv = [str(refine), "--source", str(artifact), "--output-dir", str(root / "head"),
+                    "--device", "cpu", "--updates", "2", "--eval-interval", "1", "--batch", "8"]
+            with patch.object(sys, "argv", argv):
+                runpy.run_path(str(refine), run_name="__main__")
+            refined = torch.load(root / "head/contact_world_model.pt", weights_only=False)
+            previous = torch.load(artifact, weights_only=False)
+            for key, value in previous["world_model"].items():
+                if not key.startswith("contact_head."):
+                    self.assertTrue(torch.equal(value, refined["world_model"][key]))
+            self.assertEqual(file_hash(artifact), artifact_hash)
 
 
 if __name__ == "__main__":
