@@ -135,3 +135,38 @@ Local validation: CPU unit tests and a tiny synthetic end-to-end offline fit.
 The development Mac has Python 3.9; local test execution used a temporary
 dataclass keyword compatibility shim. Repository targets Python 3.12. No local
 NVIDIA/mjlab simulation was available; the server smoke command is required.
+
+## Fresh-seed audit after contact-head refinement
+
+Keep the frozen actor source in `BASE`. Collect a new seed without fitting:
+
+```bash
+python scripts/contact_phase1.py --checkpoint "$BASE" --mode holdout --seed 3 \
+  --root audit/contact_holdout_seed3
+```
+
+Then evaluate the already selected contact model, separately for each scene:
+
+```bash
+python scripts/audit_contact_probabilities.py \
+  --model audit/contact_phase1/head_refine/contact_world_model.pt \
+  --fresh-data audit/contact_holdout_seed3/data/holdout/flat_v05 \
+    audit/contact_holdout_seed3/data/holdout/up5_v05 \
+    audit/contact_holdout_seed3/data/holdout/up8_v10 \
+    audit/contact_holdout_seed3/data/holdout/down5_v05 \
+  --output audit/contact_holdout_seed3/contact_audit.json
+```
+
+This refuses seeds found in the model's original train/validation/test manifests
+and data collected with another source checkpoint. Retain those original
+manifests at their stored paths. The report contains contact metrics for all
+legs, one/five-step dynamics metrics, source hashes, collection settings and
+terrain geometry audits. The console prints FR shank-only metrics per scene.
+Threshold remains 0.5; no parameter or policy update occurs. Existing output
+files are refused. The synthetic CPU test checks fresh-seed acceptance, reused
+seed rejection, checkpoint mismatch rejection and artifact preservation.
+
+Fresh-seed performance is a replication within these scenarios, not proof of
+unseen-terrain generalization or correct action gradients. If it holds up,
+inspect geometry errors and validate predicted responses to action changes
+against simulation before using the contact model to optimize the actor.

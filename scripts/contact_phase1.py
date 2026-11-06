@@ -30,10 +30,15 @@ def child_environment():
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--checkpoint", required=True, type=Path)
-    p.add_argument("--mode", choices=("smoke", "collect", "fit"), required=True)
+    p.add_argument("--mode", choices=("smoke", "collect", "fit", "holdout"), required=True)
     p.add_argument("--root", type=Path, default=Path("audit/contact_phase1"))
     p.add_argument("--updates", type=int, default=1500)
+    p.add_argument("--seed", type=int, help="Required for holdout collection; use an unused seed")
     args = p.parse_args()
+    if args.mode == "holdout" and (args.seed is None or args.seed < 3):
+        p.error("holdout requires --seed >= 3 (original splits use 0, 1, 2)")
+    if args.mode != "holdout" and args.seed is not None:
+        p.error("--seed is only supported for holdout")
     source = args.checkpoint.expanduser().resolve()
     if not source.is_file():
         p.error(f"Checkpoint missing: {source}")
@@ -52,8 +57,10 @@ def main():
         ("up8_v10", "terrain", "stairs_inv", 8, 1.0),
         ("down5_v05", "terrain", "stairs", 5, .5),
     ]
-    paths = {name: [] for name in ("train", "validation", "test")}
-    for split, seed in (("train", 0), ("validation", 1), ("test", 2)):
+    splits = [("holdout", args.seed)] if args.mode == "holdout" else [
+        ("train", 0), ("validation", 1), ("test", 2)]
+    paths = {name: [] for name, _ in splits}
+    for split, seed in splits:
         for name, stage, terrain, level, speed in scenes:
             directory = root / "data" / split / name
             paths[split].append(str(directory))

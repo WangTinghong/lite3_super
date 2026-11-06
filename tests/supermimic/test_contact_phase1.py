@@ -106,7 +106,7 @@ class ContactPhaseTests(unittest.TestCase):
             torch.save(dict(cfg={"wm_hidden": [16, 16]},
                             world_model=WorldModel((16, 16)).state_dict()), source)
             digest = file_hash(source)
-            for seed in (0, 1, 2):
+            for seed in (0, 1, 2, 3):
                 r = ContactRecorder(root / str(seed), dict(seed=seed, checkpoint_sha256=digest))
                 HeightField(torch.zeros(80, 80), (-3., -3.), .1).save(str(root / str(seed) / "field.pt"))
                 for _ in range(8):
@@ -148,6 +148,21 @@ class ContactPhaseTests(unittest.TestCase):
                 if not key.startswith("contact_head."):
                     self.assertTrue(torch.equal(value, refined["world_model"][key]))
             self.assertEqual(file_hash(artifact), artifact_hash)
+            refined_path = root / "head/contact_world_model.pt"
+            refined_hash = file_hash(refined_path)
+            argv = [str(audit), "--model", str(refined_path), "--fresh-data", str(root / "3"),
+                    "--output", str(root / "fresh.json"), "--device", "cpu"]
+            with patch.object(sys, "argv", argv):
+                runpy.run_path(str(audit), run_name="__main__")
+            fresh = json.loads((root / "fresh.json").read_text())
+            self.assertTrue(fresh["fresh_seed_audit"])
+            self.assertEqual(fresh["provenance"]["fresh_0_3"][0]["metadata"]["seed"], 3)
+            self.assertEqual(file_hash(refined_path), refined_hash)
+            from scripts.audit_contact_probabilities import fresh_datasets
+            with self.assertRaisesRegex(ValueError, "unused seed"):
+                fresh_datasets(refined["args"], [root / "1"], digest)
+            with self.assertRaisesRegex(ValueError, "checkpoint differs"):
+                fresh_datasets(refined["args"], [root / "3"], "wrong")
 
 
 if __name__ == "__main__":
