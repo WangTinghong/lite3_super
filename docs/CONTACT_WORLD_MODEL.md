@@ -262,3 +262,32 @@ precede policy optimization. This pilot cannot establish gait improvement.
 CPU tests cover re-encoding physical invariance, missing-ray handling, grid
 size bounds, and a synthetic end-to-end two-arm fit. GPU/mjlab terrain building
 requires execution on the server.
+
+## Hybrid arm: old state reference, fine scan surface
+
+If changing the full height reference worsens physical prediction, isolate the
+scan information using the already prepared datasets:
+
+```bash
+python scripts/fit_terrain_ablation.py --arms coarse hybrid --updates 500 \
+  --output-dir audit/terrain_hybrid_pilot/fit
+```
+
+`hybrid` uses the original states, targets, pose, labels and reference ground
+for world-height reconstruction. Only the scan surface uses the fine map:
+`relief = coarse_ground(base_xy) - fine_ground(scan_xy)`, followed by the same
+existing relief clipping. Before clipping, `s.Z + relief` equals physical base
+world height minus fine surface height. This rule is applied at recorded poses
+and predicted poses alike. Model input shape, initial weights, normalization,
+training IDs and budget match the coarse control. Both models are selected on
+validation including update zero; neither actor nor original files are changed.
+The fine map also has the fixed edge-sampling convention documented above, so
+this is a scan-representation comparison, not resolution alone.
+
+Tests verify unchanged non-scan batch values, world-height reference preservation,
+expected scan offsets, equality when the two maps coincide, bounds rejection,
+and a synthetic three-arm fit. Native GPU results are not available locally.
+Results remain a repeated high-stair regression pilot, not a gait improvement
+or fresh-terrain generalization claim. Do not use these offline artifacts as
+policy checkpoints. If hybrid does not improve the physical/contact tradeoff,
+retain the coarse baseline rather than automatically extending training.

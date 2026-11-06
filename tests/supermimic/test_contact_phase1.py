@@ -245,11 +245,34 @@ class ContactPhaseTests(unittest.TestCase):
             ablation = script.parent/'fit_terrain_ablation.py'
             argv = [str(ablation),'--source',str(refined_path),'--old-root',str(root/'coarse'),
                     '--fine-root',str(root/'fine'),'--output-dir',str(root/'ablation'),
-                    '--updates','2','--batch','8','--eval-windows','12','--eval-interval','1','--device','cpu']
+                    '--updates','2','--batch','8','--eval-windows','12','--eval-interval','1','--device','cpu',
+                    '--arms','coarse','fine','hybrid']
             with patch.object(sys,'argv',argv): runpy.run_path(str(ablation),run_name='__main__')
             summary = json.loads((root/'ablation/summary.json').read_text())
             self.assertFalse(summary['actor_updated'])
             self.assertIn('base_world_z_rmse',summary['comparison']['step_5']['fine'])
+            self.assertIn('base_world_z_rmse',summary['comparison']['step_5']['hybrid'])
+            from scripts.fit_terrain_ablation import CheckedDataset, HybridDataset
+            old_ds=CheckedDataset([root/'coarse/train/up8_v10'],5)
+            fine_ds=CheckedDataset([root/'fine/train/up8_v10'],5)
+            hybrid=HybridDataset(old_ds,fine_ds)
+            indices=torch.arange(3)
+            old_batch=old_ds.batch(indices,'cpu')
+            hybrid_batch=hybrid.batch(indices,'cpu')
+            for key in old_batch:
+                if key!='relief': self.assertTrue(torch.equal(old_batch[key],hybrid_batch[key]))
+            torch.testing.assert_close(hybrid_batch['relief'],old_batch['relief']-.04)
+            pose=old_batch['pose0'][:,0]
+            torch.testing.assert_close(hybrid.ground_at(indices,pose,'cpu'),old_ds.ground_at(indices,pose,'cpu'))
+            # Same physical input height, fine surface, old height reference.
+            expected=old_batch['s0'][:,0,0,None]-.04
+            torch.testing.assert_close(hybrid_batch['s0'][:,0,0,None]+hybrid.relief_at(indices,pose,'cpu'),
+                                       expected.expand(-1,77))
+            fine_ds.fields[0].h=old_ds.fields[0].h.clone()
+            torch.testing.assert_close(hybrid.relief_at(indices,pose,'cpu'),old_ds.relief_at(indices,pose,'cpu'))
+            with self.assertRaisesRegex(ValueError,'left stored field'):
+                hybrid.relief_at(indices,pose+100,'cpu')
+
             self.assertEqual(file_hash(refined_path),refined_hash)
 
             argv = [str(audit), "--model", str(refined_path), "--fresh-data", str(root / "3"),

@@ -15,19 +15,65 @@ from lite3_supermimic.supermimic import state as st
 from lite3_supermimic.target import terrain as tr
 
 
+def check_field_bounds(points, field):
+    if field is None:
+        return
+    x=(points[...,0]-field.origin[0])/field.res
+    y=(points[...,1]-field.origin[1])/field.res
+    if bool(((x<0)|(y<0)|(x>field.h.shape[1]-1.001)|(y>field.h.shape[0]-1.001)).any()):
+        raise ValueError('Predicted scan left stored field: refusing silently clamped terrain')
+
+
 class CheckedDataset(ContactDataset):
     def relief_at(self, ids, pose, device):
         rows=self.index[ids]
         for cid in rows[:,0].unique().tolist():
-            field=self.fields[cid]
-            if field is None: continue
             selected=pose[(rows[:,0]==cid).to(device)]
             points=torch.cat((selected[:,None,:2],tr.scan_world(selected[:,:2],selected[:,2])),1)
-            x=(points[...,0]-field.origin[0])/field.res
-            y=(points[...,1]-field.origin[1])/field.res
-            if bool(((x<0)|(y<0)|(x>field.h.shape[1]-1.001)|(y>field.h.shape[0]-1.001)).any()):
-                raise ValueError('Predicted scan left stored field: refusing silently clamped terrain')
+            check_field_bounds(points,self.fields[cid])
         return super().relief_at(ids,pose,device)
+
+
+class HybridDataset(CheckedDataset):
+    """Original state/targets/reference ground, fine scan surface only.
+
+    Before relief clipping, s.Z + relief = world_base_z - fine_scan_surface.
+    Both training and autoregressive evaluation use this same construction.
+    """
+    def __init__(self, coarse, fine):
+        if not torch.equal(coarse.index,fine.index):
+            raise ValueError('Hybrid requires aligned trajectory windows')
+        self.horizon=coarse.horizon
+        self.chunks=coarse.chunks
+        self.index=coarse.index
+        self.event=coarse.event
+        self.fields=coarse.fields
+        self.manifests=coarse.manifests
+        self.scan_fields=fine.fields
+
+    @torch.no_grad()
+    def relief_at(self, ids, pose, device):
+        rows=self.index[ids]
+        output=torch.empty((len(rows),tr.SCAN_POINTS),device=device,dtype=pose.dtype)
+        for cid in rows[:,0].unique().tolist():
+            mask=(rows[:,0]==cid).to(device)
+            selected=pose[mask]
+            reference,surface=self.fields[cid],self.scan_fields[cid]
+            xy=tr.scan_world(selected[:,:2],selected[:,2])
+            check_field_bounds(selected[:,:2],reference)
+            check_field_bounds(xy,surface)
+            for field in (reference,surface):
+                if field is not None and field.h.device!=pose.device:
+                    field.h=field.h.to(device)
+            relief=tr.ground(selected[:,:2],reference)[:,None]-tr.ground(xy,surface)
+            output[mask]=relief.clamp(*tr.RELIEF_CLIP)
+        return output
+
+    def batch(self, ids, device):
+        b=super().batch(ids,device)
+        b['relief']=torch.stack([self.relief_at(ids,b['pose0'][:,j],device)
+                                 for j in range(self.horizon)],1)
+        return b
 
 
 def paired_loss(model, dataset, ids, device):
@@ -73,12 +119,14 @@ def main():
     p.add_argument('--old-root',default='audit/contact_phase1/data')
     p.add_argument('--fine-root',default='audit/terrain_2cm_pilot/data')
     p.add_argument('--output-dir',default='audit/terrain_2cm_pilot/fit')
+    p.add_argument('--arms',nargs='+',choices=('coarse','fine','hybrid'),default=['coarse','fine'])
     p.add_argument('--updates',type=int,default=500)
     p.add_argument('--batch',type=int,default=256)
     p.add_argument('--eval-windows',type=int,default=2048)
     p.add_argument('--eval-interval',type=int,default=100)
     p.add_argument('--device',default='cuda:0')
     a=p.parse_args()
+    if len(set(a.arms))!=len(a.arms): p.error('arms must be unique')
     if min(a.updates,a.batch,a.eval_windows,a.eval_interval)<1: p.error('counts must be positive')
     out=Path(a.output_dir)
     if out.exists() and any(out.iterdir()): p.error('output-dir must be empty')
@@ -93,12 +141,13 @@ def main():
             if any(m['metadata']['checkpoint_sha256']!=saved['source_sha256'] for m in ds.manifests):
                 p.error('Model/data source mismatch')
     for old,new in zip(datasets['coarse'],datasets['fine']): verify_pair(old,new)
+    datasets['hybrid']=[HybridDataset(old,new) for old,new in zip(datasets['coarse'],datasets['fine'])]
     gen=torch.Generator().manual_seed(1042)
     vi=torch.randperm(len(datasets['coarse'][1].index),generator=gen)[:a.eval_windows]
     ti=torch.randperm(len(datasets['coarse'][2].index),generator=gen)[:a.eval_windows]
     out.mkdir(parents=True,exist_ok=True)
     reports={}
-    for name in ('coarse','fine'):
+    for name in a.arms:
         torch.manual_seed(42)
         train,val,test=datasets[name]
         model=ContactWorldModel(tuple(saved['wm_hidden'])).to(a.device)
@@ -144,11 +193,14 @@ def main():
     summary=dict(actor_updated=False,policy_inputs_changed=False,source_model_unchanged=True,
                  scope='up8_v10 only; repeated seed-2 regression test, not fresh generalization',
                  selection='Each representation selected on validation MSE + 0.2 BCE, including update zero',
-                 normalization='same frozen source buffers; base-height reference differs, compare physical metrics too',
-                 updates_per_arm=a.updates,comparison={})
+                 normalization='same frozen source buffers; height references are specified in representations; compare physical metrics too',
+                 updates_per_arm=a.updates,arms=a.arms,
+                 representations={name:dict(state_reference='fine' if name=='fine' else 'coarse',
+                                            scan_surface='coarse' if name=='coarse' else 'fine') for name in a.arms},
+                 comparison={})
     for step in ('step_1','step_5'):
         summary['comparison'][step]={}
-        for name in ('coarse','fine'):
+        for name in a.arms:
             r=reports[name]['after_test'][step]['all']
             summary['comparison'][step][name]=dict(selected_update=reports[name]['selected_update'],
                 **{k:v for k,v in r.items() if k!='contacts'},fr_shank_only=r['contacts']['shank_only_FR'])
