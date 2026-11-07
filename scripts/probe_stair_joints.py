@@ -5,6 +5,10 @@ from pathlib import Path
 import subprocess
 import sys
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from scripts.contact_phase1 import child_environment
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -32,7 +36,7 @@ def main():
             "--seconds", str(args.seconds), "--seed", str(args.seed),
             "--probe-fr-hipy", str(hipy), "--probe-fr-knee", str(knee),
             "--output", str(output),
-        ], check=True)
+        ], env=child_environment(), check=True)
         data = json.loads(output.read_text())
         summary.append({
             "case": case, "falls": data["falls"],
