@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import torch
 from torch import nn
+from pathlib import Path
 
 from lite3_supermimic.supermimic.world_model import WorldModel
 from lite3_supermimic.supermimic import state as st
@@ -36,6 +37,22 @@ class ContactWorldModel(WorldModel):
 
 def labels(contact):
     return torch.cat((contact, contact[..., 4:] & ~contact[..., :4]), -1).float()
+
+
+def initialize_dynamics(world_model, optimizer, artifact_path, source_checkpoint):
+    """Install contact-supervised continuous dynamics, leaving the head offline."""
+    from .contact_data import file_hash
+    artifact = torch.load(artifact_path, map_location="cpu", weights_only=False)
+    if (artifact.get("schema") != "lite3-contact-wm-offline-v1"
+        or artifact.get("source_sha256") != file_hash(source_checkpoint)):
+        raise ValueError("Contact world model does not match the resumed policy checkpoint")
+    dynamics = {key: value for key, value in artifact["world_model"].items()
+                if not key.startswith("contact_head.")}
+    if set(dynamics) != set(world_model.state_dict()):
+        raise ValueError("Contact world model dynamics architecture differs")
+    world_model.load_state_dict(dynamics, strict=True)
+    optimizer.state.clear()  # Adam moments from the source model are stale.
+    return Path(artifact_path)
 
 
 def probability_diagnostics(prob, truth):

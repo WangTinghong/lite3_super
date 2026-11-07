@@ -17,6 +17,28 @@ from lite3_supermimic.supermimic.world_model import WorldModel
 
 
 class ContactPhaseTests(unittest.TestCase):
+    def test_contact_dynamics_initializer_preserves_artifact_and_rejects_wrong_source(self):
+        from lite3_supermimic.locomotion.contact_model import initialize_dynamics
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source.pt"
+            source.write_bytes(b"fixed source checkpoint")
+            trained = ContactWorldModel((16, 16))
+            target = WorldModel((16, 16))
+            optimizer = torch.optim.Adam(target.parameters())
+            optimizer.state[next(target.parameters())]["step"] = torch.tensor(1)
+            artifact = root / "contact.pt"
+            torch.save({"schema": "lite3-contact-wm-offline-v1",
+                        "source_sha256": file_hash(source),
+                        "world_model": trained.state_dict()}, artifact)
+            initialize_dynamics(target, optimizer, artifact, source)
+            for name, value in target.state_dict().items():
+                torch.testing.assert_close(value, trained.state_dict()[name])
+            self.assertFalse(optimizer.state)
+            source.write_bytes(b"different source checkpoint")
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                initialize_dynamics(target, optimizer, artifact, source)
+
     def test_geometry_grid_reconstruction(self):
         from lite3_supermimic.locomotion.geometry_compare import ray_grid_interpolate, error_stats
         points = np.array([[.013, .017], [-.029, .035], [.105, -.04]])

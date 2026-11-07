@@ -35,6 +35,7 @@ class TrainCfg(BaseCfg):
     hipx_refine: bool = False
     hipx_target_refine: bool = False
     amp_motion_dir: str = ""
+    contact_wm_init: str = ""
     amp_weight: float = 0.5
     amp_start_iteration: int = 500
     amp_ramp_iterations: int = 1000
@@ -70,6 +71,10 @@ class TrainCfg(BaseCfg):
                        if not (Path(self.amp_motion_dir).expanduser() / name).is_file()]
             if missing:
                 raise ValueError(f"AMP motion files missing from {self.amp_motion_dir}: {missing}")
+        if self.contact_wm_init and not self.resume:
+            raise ValueError("--contact-wm-init requires --resume from its source policy checkpoint")
+        if self.contact_wm_init and not Path(self.contact_wm_init).expanduser().is_file():
+            raise ValueError(f"Contact world model missing: {self.contact_wm_init}")
         if self.amp_weight < 0 or self.amp_start_iteration < 0 or self.amp_ramp_iterations <= 0:
             raise ValueError("AMP weight/start/ramp must be nonnegative/nonnegative/positive")
         if self.amp_batch <= 0 or self.amp_updates < 0 or self.amp_lr <= 0:
@@ -118,6 +123,10 @@ class Trainer(BaseTrainer):
                     raise ValueError("Changing stair geometry requires a new run; omit --continue-run")
             if bool(checkpoint["cfg"].get("stair_refine", False)) != cfg.stair_refine:
                 cfg.reset_critic = True
+            if cfg.contact_wm_init:
+                cfg.reset_critic = True  # The imagined dynamics and value targets change.
+                if cfg.continue_run:
+                    raise ValueError("--contact-wm-init starts a new pilot; omit --continue-run")
             if cfg.continue_run and changed_stage:
                 raise ValueError("--continue-run requires the same stage; omit it for stage transfer")
             if changed_stage:
@@ -198,6 +207,7 @@ class Trainer(BaseTrainer):
         self.lr_scale, self.ramp_start = 1.0, 0
         self.nonfinite_steps, self.start_it = 0, 0
         self.last_ckpt = None
+        self.contact_wm_hash = None
         self.window_falls, self.window_steps = 0, 0
         stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")
         self.log_dir = Path(cfg.log_root) / f"{stamp}_{cfg.run_name}"
@@ -210,6 +220,13 @@ class Trainer(BaseTrainer):
         ckpt = torch.load(path, map_location=self.dev, weights_only=False)
         validate_checkpoint(ckpt)
         super().load(path)
+        if self.cfg.contact_wm_init:
+            from .contact_model import initialize_dynamics
+            from .contact_data import file_hash
+            initialize_dynamics(self.wm, self.opt_wm, self.cfg.contact_wm_init, path)
+            self.contact_wm_hash = file_hash(self.cfg.contact_wm_init)
+            print(f"contact-supervised dynamics initialised from {self.cfg.contact_wm_init}; "
+                  "contact head is diagnostic only", flush=True)
         if self.anchor_actor is not None:
             self.anchor_actor.load_state_dict(ckpt.get("gait_anchor_actor", ckpt["actor"]))
             self.anchor_actor.eval()
@@ -298,6 +315,7 @@ class Trainer(BaseTrainer):
                     world_model=self.wm.state_dict(), opt_wm=self.opt_wm.state_dict(),
                     opt_actor=self.opt_actor.state_dict(), opt_critic=self.opt_critic.state_dict(),
                     env_steps=self.env_steps, command_steps=self.env.common_step_counter,
+                    contact_wm_init_sha256=self.contact_wm_hash,
                     terrain_levels=terrain.terrain_levels if self.field is not None else None)
         if self.amp is not None:
             data["amp_style"] = self.amp.state_dict()

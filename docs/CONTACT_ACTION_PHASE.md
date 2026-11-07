@@ -13,3 +13,9 @@ python -u scripts/contact_action_phase.py --checkpoint "$SOURCE" --initialize-co
 The production model and held-out summary are saved under `audit/contact_action_phase/fit/`. Collection resumes completed cases but refuses an incomplete or mismatched directory, preventing silent data mixing. Fitting requires an empty output directory.
 
 The held-out report tests prediction on actions from distinct seeds. This is not yet a paired counterfactual test or a walking improvement result; keep the actor frozen until those checks and a gated actor pilot pass.
+
+## Short actor pilot
+
+If a one-step paired audit has no actual contact changes, it cannot establish contact-head action sensitivity. A separate opt-in training flag, `--contact-wm-init`, can still initialize the ordinary SuperMimic dynamics from the contact-supervised model. The contact head stays offline: imagined reward, AMP, and gait retention remain the actor objectives. This isolates whether the improved dynamics itself helps control, without granting the unvalidated contact head authority over the actor.
+
+Use the same source policy checkpoint that was recorded in the contact artifact. The loader verifies its SHA-256, installs only the continuous dynamics, clears stale world-model optimizer moments, and resets the critic. This starts a new run and cannot be combined with `--continue-run`. Compare the saved pilot policy against the unchanged source checkpoint with identical MuJoCo evaluation seeds and terrain settings before extending training.
