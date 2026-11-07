@@ -105,6 +105,21 @@ class ContactPhaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'No common valid'):
             summarize_counterfactual({'baseline':dict(base,done=active),'hipy_minus':changed})
 
+    def test_action_response_prefix_guard_reports_field(self):
+        from scripts.audit_action_response import verify_same_prefix
+        pre={'state':torch.tensor([1.,2.]),'foot_contact':torch.tensor([True,False])}
+        base={'step':7,'active':torch.tensor([True,False]),'pre':pre}
+        close={'step':7,'active':base['active'].clone(),
+               'pre':{'state':torch.tensor([1.000001,2.]),'foot_contact':pre['foot_contact'].clone()}}
+        differences=verify_same_prefix({'baseline':base,'hipy_minus':close})
+        self.assertLess(differences['hipy_minus']['state'],1e-5)
+        changed={'step':7,'active':base['active'].clone(),
+                 'pre':{'state':torch.tensor([1.1,2.]),'foot_contact':pre['foot_contact'].clone()}}
+        with self.assertRaisesRegex(RuntimeError,'hipy_minus.state: max abs difference'):
+            verify_same_prefix({'baseline':base,'hipy_minus':changed})
+        with self.assertRaisesRegex(RuntimeError,'trigger step'):
+            verify_same_prefix({'baseline':base,'hipy_minus':dict(close,step=8)})
+
     def test_probability_ranking_and_ties(self):
         truth = torch.tensor([True, False, True, False])
         tied = probability_diagnostics(torch.ones(4) * .1, truth)

@@ -3,6 +3,7 @@ import argparse
 import json
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -35,6 +36,41 @@ def summarize_counterfactual(raw):
     return output
 
 
+def verify_same_prefix(raw, *, atol=1e-5):
+    """Reject comparisons whose pre-intervention simulations are not matched."""
+    import torch
+    baseline=raw['baseline']
+    failures=[]
+    diagnostics={}
+    for name,item in raw.items():
+        if name=='baseline': continue
+        if item['step']!=baseline['step']:
+            failures.append(f'{name}: trigger step {item["step"]} != {baseline["step"]}')
+        if not torch.equal(item['active'],baseline['active']):
+            failures.append(f'{name}: active masks differ')
+        field_diffs={}
+        for field,expected in baseline['pre'].items():
+            actual=item['pre'][field]
+            if expected.shape!=actual.shape:
+                failures.append(f'{name}.{field}: shape {tuple(actual.shape)} != {tuple(expected.shape)}')
+                continue
+            if expected.dtype==torch.bool:
+                differences=int((actual!=expected).sum())
+                field_diffs[field]=differences
+                if differences: failures.append(f'{name}.{field}: {differences} boolean entries differ')
+            else:
+                delta=(actual-expected).abs()
+                maximum=float(delta.max()) if delta.numel() else 0.
+                field_diffs[field]=maximum
+                if not torch.isfinite(delta).all() or maximum>atol:
+                    failures.append(f'{name}.{field}: max abs difference {maximum:.6g} > {atol:g}')
+        diagnostics[name]=field_diffs
+    if failures:
+        raise RuntimeError('Same-prefix states diverged; refusing causal comparison. '
+                           + '; '.join(failures))
+    return diagnostics
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--checkpoint',required=True)
@@ -46,17 +82,51 @@ def main():
     p.add_argument('--min-active',type=int,default=4)
     p.add_argument('--device',default='cuda:0')
     p.add_argument('--worker',action='store_true',help=argparse.SUPPRESS)
+    p.add_argument('--case',choices=('baseline','hipy_minus','hipy_plus','knee_minus','knee_plus'),help=argparse.SUPPRESS)
+    p.add_argument('--raw-output',help=argparse.SUPPRESS)
     a=p.parse_args()
     if len(set(a.seeds))!=len(a.seeds) or any(s<3 for s in a.seeds): p.error('Use unique unused seeds >=3')
     if min(a.num_envs,a.max_seconds,a.min_active)<=0: p.error('Positive counts/seconds required')
     out=Path(a.output)
-    if out.exists(): p.error('Output already exists')
+    if out.exists() and not a.worker: p.error('Output already exists')
+    cases=(('baseline',0.,0.),('hipy_minus',-.1,0.),('hipy_plus',.1,0.),
+           ('knee_minus',0.,-.1),('knee_plus',0.,.1))
     if not a.worker:
+        import torch
         from scripts.contact_phase1 import child_environment
-        subprocess.run([sys.executable,'-u',str(Path(__file__).resolve()),*sys.argv[1:],'--worker'],
-                       env=child_environment(),check=True)
+        from lite3_supermimic.locomotion.contact_data import file_hash
+        result=dict(actor_updated=False,world_model_updated=False,one_step_only=True,
+                    source_sha256=file_hash(a.checkpoint),model_sha256=file_hash(a.contact_model),
+                    terrain='stairs_inv',terrain_level=8,command=[1.,0.,0.],cases={},
+                    prefix_tolerance=1e-5)
+        with tempfile.TemporaryDirectory(prefix='lite3_action_response_') as temp:
+            for seed in a.seeds:
+                seed_raw={}
+                for name,_,_ in cases:
+                    raw_path=Path(temp)/f'{seed}_{name}.pt'
+                    command=[sys.executable,'-u',str(Path(__file__).resolve()),
+                             '--checkpoint',a.checkpoint,'--contact-model',a.contact_model,
+                             '--output',a.output,'--seeds',str(seed),'--num-envs',str(a.num_envs),
+                             '--max-seconds',str(a.max_seconds),'--min-active',str(a.min_active),
+                             '--device',a.device,'--worker','--case',name,
+                             '--raw-output',str(raw_path)]
+                    worker_env=child_environment()
+                    worker_env['PYTHONHASHSEED']=str(seed)
+                    subprocess.run(command,env=worker_env,check=True)
+                    seed_raw[name]=torch.load(raw_path,map_location='cpu',weights_only=False)
+                differences=verify_same_prefix(seed_raw)
+                result['cases'][str(seed)]=summarize_counterfactual(seed_raw)
+                result.setdefault('prefix_max_abs_difference',{})[str(seed)]=differences
+                print(f'seed {seed}: same-prefix check passed',flush=True)
+        out.parent.mkdir(parents=True,exist_ok=True)
+        out.write_text(json.dumps(result,indent=2)+'\n')
+        print(json.dumps(result,indent=2),flush=True)
+        print(f'Saved {out}. One-step response only; no actor optimization.',flush=True)
         return
-    import hashlib
+    if a.case is None or a.raw_output is None or len(a.seeds)!=1:
+        p.error('--worker requires one --case, one --seeds value, and --raw-output')
+    import random
+    import numpy as np
     import torch
     from mjlab.envs import ManagerBasedRlEnv
     from lite3_supermimic.locomotion.env import make_env_cfg
@@ -75,15 +145,10 @@ def main():
         p.error('Contact model does not match frozen policy source')
     wm=ContactWorldModel(tuple(wm_saved['wm_hidden'])).to(a.device)
     wm.load_state_dict(wm_saved['world_model']); wm.eval()
-    cases=(('baseline',0.,0.),('hipy_minus',-.1,0.),('hipy_plus',.1,0.),
-           ('knee_minus',0.,-.1),('knee_plus',0.,.1))
-    result=dict(actor_updated=False,world_model_updated=False,one_step_only=True,
-                source_sha256=file_hash(a.checkpoint),model_sha256=file_hash(a.contact_model),
-                terrain='stairs_inv',terrain_level=8,command=[1.,0.,0.],cases={})
     for seed in a.seeds:
-        seed_raw={}
-        reference=None
         for name,hipy,knee in cases:
+            if name!=a.case: continue
+            random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
             cfg=make_env_cfg('terrain',play=True,harder_stairs=bool(actor_ckpt['cfg'].get('harder_stairs',False)))
             cfg.seed=seed; cfg.scene.num_envs=a.num_envs; cfg.auto_reset=False
             command_cfg=cfg.commands['velocity']; command_cfg.fixed_level=8; command_cfg.fixed_command=(1.,0.,0.)
@@ -119,19 +184,17 @@ def main():
                             adjusted,_=front_leg_probe(action,s0,p0,cmd,term.height_field,
                                                        foot0,scale,hipy,knee)
                             # In baseline, the probe function returns original actions.
-                            tensors=(s0,p0,action,prev,context,foot0.float(),cmd,gate)
-                            digest=hashlib.sha256(b''.join(x.detach().cpu().contiguous().numpy().tobytes()
-                                                     for x in tensors)).hexdigest()
-                            if reference is None: reference=(step,digest,active.detach().cpu())
-                            elif step!=reference[0] or digest!=reference[1] or not torch.equal(active.cpu(),reference[2]):
-                                raise RuntimeError('Same-prefix states diverged; refusing causal comparison')
+                            pre=dict(state=s0,pose=p0,action=action,previous_action=prev,
+                                     context=context,foot_contact=foot0,command=cmd,gate=gate)
+                            pre={key:value.detach().cpu().clone() for key,value in pre.items()}
                             relief=tr.relief(p0[:,:2],p0[:,2],term.height_field)
                             _,_,logits=wm.predict(s0,adjusted,prev,context,relief)
                             obs,_,terminated,truncated,_=env.step(adjusted)
                             feet1,_=read_contacts(env.scene['feet_ground_contact'])
                             shanks1,_=read_shank_contacts(env.scene['shanks_ground_contact'])
                             shank_only=shanks1[:,0] & ~feet1[:,0]
-                            seed_raw[name]=dict(
+                            raw=dict(
+                                step=step,pre=pre,
                                 active=active.detach().cpu().clone(),
                                 done=(terminated|truncated).detach().cpu().clone(),
                                 prob=logits[:,8].sigmoid().detach().cpu().clone(),
@@ -154,11 +217,7 @@ def main():
                 print(f'seed {seed}, {name}: same-prefix intervention at step {step}; active={int(active.sum())}',flush=True)
             finally:
                 env.close()
-        result['cases'][str(seed)]=summarize_counterfactual(seed_raw)
-    out.parent.mkdir(parents=True,exist_ok=True)
-    out.write_text(json.dumps(result,indent=2)+'\n')
-    print(json.dumps(result,indent=2),flush=True)
-    print(f'Saved {out}. One-step response only; no actor optimization.',flush=True)
+        torch.save(raw,a.raw_output)
 
 
 if __name__=='__main__': main()
