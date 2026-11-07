@@ -291,3 +291,32 @@ Results remain a repeated high-stair regression pilot, not a gait improvement
 or fresh-terrain generalization claim. Do not use these offline artifacts as
 policy checkpoints. If hybrid does not improve the physical/contact tradeoff,
 retain the coarse baseline rather than automatically extending training.
+
+## Same-prefix action-response check
+
+After rejecting the fine and hybrid scan pilots, keep the original actor and
+validated contact-head model. `audit_action_response.py` replays the frozen
+actor from an identical seed before each one-step intervention, requires a
+bitwise match of pre-intervention state, pose, action, context, contact, gate
+and previous action, and compares model predictions with actual MuJoCo contact
+on the intersection of valid active environments. This avoids comparing
+different initial states or different surviving populations. It tests only
+one-step FR shank-only risk at the same high-stair approach, not long-term gait.
+
+```bash
+python scripts/audit_action_response.py --checkpoint "$BASE" \
+  --contact-model audit/contact_phase1/head_refine/contact_world_model.pt \
+  --output audit/action_response/summary.json --seeds 3 4 5
+```
+
+Cases: baseline; FR HipY +/-0.1 rad; FR Knee +/-0.1 rad. The existing stair
+probe gate scales each offset in the same physical pre-state. Each seed uses
+64 environments, at most 20 s of shared-prefix walking, then one intervention
+step. A run fails rather than reporting an invalid comparison if prefix states
+diverge or no common valid intervention states exist. If no approach activates
+four environments before 20 s, lower `--min-active` or extend `--max-seconds`
+with a *new output path*. Model and policy parameters never update. Results
+include predicted/actual risk changes versus baseline, foot contact, falls and
+applied action deltas. Since a one-step discrete contact event can be sparse,
+interpret counts and consistency across seeds; do not promote a controller
+from one seed or a mere decrease in predicted probability.

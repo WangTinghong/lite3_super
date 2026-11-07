@@ -86,6 +86,25 @@ class ContactPhaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'oversized'):
             build_diagnostic_grid((0.,0.,100.,100.),.02,ray,max_nodes=100)
 
+    def test_same_prefix_counterfactual_common_population(self):
+        from scripts.audit_action_response import summarize_counterfactual
+        active=torch.tensor([True,True,False])
+        base=dict(active=active,done=torch.tensor([False,False,False]),
+                  prob=torch.tensor([.8,.6,.1]),actual=torch.tensor([True,False,False]),
+                  foot=torch.tensor([False,True,True]),metadata={'step':20})
+        changed=dict(active=active,done=torch.tensor([False,True,False]),
+                     prob=torch.tensor([.2,.9,.1]),actual=torch.tensor([False,True,False]),
+                     foot=torch.tensor([True,False,True]),metadata={'step':20})
+        report=summarize_counterfactual({'baseline':base,'hipy_minus':changed})
+        self.assertEqual(report['baseline']['common_valid'],1)
+        self.assertEqual(report['hipy_minus']['common_valid'],1)
+        self.assertAlmostEqual(report['hipy_minus']['actual_risk_delta_vs_baseline'],-1.)
+        self.assertAlmostEqual(report['hipy_minus']['predicted_risk_delta_vs_baseline'],-.6,places=6)
+        with self.assertRaisesRegex(ValueError,'Active masks'):
+            summarize_counterfactual({'baseline':base,'hipy_minus':dict(changed,active=~active)})
+        with self.assertRaisesRegex(ValueError,'No common valid'):
+            summarize_counterfactual({'baseline':dict(base,done=active),'hipy_minus':changed})
+
     def test_probability_ranking_and_ties(self):
         truth = torch.tensor([True, False, True, False])
         tied = probability_diagnostics(torch.ones(4) * .1, truth)
