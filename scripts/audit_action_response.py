@@ -131,6 +131,8 @@ def main():
     p.add_argument('--num-envs',type=int,default=64)
     p.add_argument('--max-seconds',type=float,default=40.)
     p.add_argument('--min-active',type=int,default=4)
+    p.add_argument('--delta',type=float,default=0.1,
+                   help='Absolute FR HipY/Knee intervention in radians (0 < delta <= 0.15)')
     p.add_argument('--device',default='cuda:0')
     p.add_argument('--worker',action='store_true',help=argparse.SUPPRESS)
     p.add_argument('--case',choices=('baseline','baseline_repeat','hipy_minus','hipy_plus','knee_minus','knee_plus'),help=argparse.SUPPRESS)
@@ -139,16 +141,18 @@ def main():
     a=p.parse_args()
     if len(set(a.seeds))!=len(a.seeds) or any(s<3 for s in a.seeds): p.error('Use unique unused seeds >=3')
     if min(a.num_envs,a.max_seconds,a.min_active)<=0: p.error('Positive counts/seconds required')
+    if not 0 < a.delta <= 0.15: p.error('--delta must be in (0, 0.15] rad')
     out=Path(a.output)
     if out.exists() and not a.worker: p.error('Output already exists')
-    cases=(('baseline',0.,0.),('baseline_repeat',0.,0.),('hipy_minus',-.1,0.),('hipy_plus',.1,0.),
-           ('knee_minus',0.,-.1),('knee_plus',0.,.1))
+    cases=(('baseline',0.,0.),('baseline_repeat',0.,0.),('hipy_minus',-a.delta,0.),('hipy_plus',a.delta,0.),
+           ('knee_minus',0.,-a.delta),('knee_plus',0.,a.delta))
     if not a.worker:
         import torch
         from scripts.contact_phase1 import child_environment
         from lite3_supermimic.locomotion.contact_data import file_hash
         result=dict(actor_updated=False,world_model_updated=False,one_step_only=True,
                     source_sha256=file_hash(a.checkpoint),model_sha256=file_hash(a.contact_model),
+                    intervention_delta_rad=a.delta,
                     terrain='stairs_inv',terrain_level=8,command=[1.,0.,0.],cases={},
                     prefix_abs_tolerances=PREFIX_ABS_TOLERANCES,
                     event_selection='First baseline step with >=min-active gait gates and at least one active FR shank-only contact',
@@ -163,6 +167,7 @@ def main():
                              '--checkpoint',a.checkpoint,'--contact-model',a.contact_model,
                              '--output',a.output,'--seeds',str(seed),'--num-envs',str(a.num_envs),
                              '--max-seconds',str(a.max_seconds),'--min-active',str(a.min_active),
+                             '--delta',str(a.delta),
                              '--device',a.device,'--worker','--case',name,
                              '--raw-output',str(raw_path)]
                     if trigger_step is not None:
@@ -245,7 +250,7 @@ def main():
                         foot0,_=read_contacts(env.scene['feet_ground_contact'])
                         context=reader.read()
                         _,gate=front_leg_probe(action,s0,p0,cmd,term.height_field,
-                                                foot0,scale,-.1,0.)
+                                                foot0,scale,-a.delta,0.)
                         active=(gate>.01)
                         if a.trigger_step>=0 and step==a.trigger_step and int(active.sum())<a.min_active:
                             raise RuntimeError(f'Seed {seed}, {name}: only {int(active.sum())} active envs at baseline trigger step {step}')
