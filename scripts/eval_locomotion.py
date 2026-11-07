@@ -50,8 +50,8 @@ def main():
         parser.error("Choose --viewer or --video for one run")
     if args.viewer and args.wm_audit:
         parser.error("--wm-audit requires a quantitative run without --viewer")
-    if args.contact_data and (args.viewer or args.video or probe_on or args.random_commands):
-        parser.error("--contact-data requires fixed-command quantitative baseline evaluation")
+    if args.contact_data and (args.viewer or args.video or args.random_commands):
+        parser.error("--contact-data requires fixed-command quantitative evaluation")
     if args.contact_data and Path(args.contact_data).exists() and any(Path(args.contact_data).iterdir()):
         parser.error("--contact-data must be a new/empty directory; existing data is never overwritten")
     if args.keyboard and not args.viewer:
@@ -148,6 +148,9 @@ def main():
                 "command": cmd_cfg.fixed_command, "dt": env.step_dt,
                 "field_res_m": term.height_field.res if term.height_field else None,
                 "num_envs": env.num_envs, "seconds": args.seconds,
+                "action_source": "frozen_actor_plus_gated_probe" if probe_on else "frozen_actor",
+                "probe_fr_hipy_rad": args.probe_fr_hipy,
+                "probe_fr_knee_rad": args.probe_fr_knee,
                 "versions": versions,
                 "contact_timing": "post-step, before manual reset",
             })

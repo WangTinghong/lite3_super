@@ -94,6 +94,7 @@ def main():
     p.add_argument("--eval-interval", type=int, default=250)
     p.add_argument("--eval-windows", type=int, default=8192)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--initialize-contact-model", help="Compatible offline contact model to continue fitting")
     args = p.parse_args()
     if min(args.updates, args.batch, args.horizon, args.eval_interval, args.eval_windows) < 1 or not (0 < args.lr < 1) or not (0 <= args.contact_weight < 100):
         p.error("Invalid positive counts, learning rate, or contact weight")
@@ -114,6 +115,13 @@ def main():
     baseline.load_state_dict(ckpt["world_model"])
     model = ContactWorldModel(hidden).to(args.device)
     model.load_baseline(ckpt["world_model"])
+    if args.initialize_contact_model:
+        initial = torch.load(args.initialize_contact_model, map_location="cpu", weights_only=False)
+        if (initial.get("schema") != "lite3-contact-wm-offline-v1"
+            or initial.get("source_sha256") != source_hash
+            or tuple(initial.get("wm_hidden", ())) != hidden):
+            p.error("initial contact model is incompatible with checkpoint")
+        model.load_state_dict(initial["world_model"])
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     generator = torch.Generator().manual_seed(args.seed)
     valid_ids = torch.randperm(len(val.index), generator=generator)[:args.eval_windows]
@@ -122,7 +130,12 @@ def main():
     initial = evaluate(baseline, val, valid_ids, args.device)
     (out / "baseline_validation.json").write_text(json.dumps(initial, indent=2) + "\n")
     events = train.event.nonzero().flatten()
-    best, best_weights, best_it = float("inf"), None, 0
+    initial_contact_validation = evaluate(model, val, valid_ids, args.device)
+    initial_all = initial_contact_validation[f"step_{args.horizon}"]["all"]
+    best = initial_all["normalized_mse"] + args.contact_weight * initial_all["bce"]
+    best_weights = copy.deepcopy({k: v.cpu() for k, v in model.state_dict().items()})
+    best_it = 0
+    (out / "initial_contact_validation.json").write_text(json.dumps(initial_contact_validation, indent=2) + "\n")
     scale = model.out_norm.var.sqrt() + 1e-6  # Keep the baseline normalization fixed.
     for it in range(1, args.updates + 1):
         model.train()
