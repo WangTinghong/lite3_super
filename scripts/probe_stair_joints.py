@@ -19,13 +19,29 @@ def main():
     parser.add_argument("--num-envs", type=int, default=64)
     parser.add_argument("--seconds", type=float, default=20.0)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--hipy-delta", type=float, default=-0.1,
+                        help="FR HipY target offset in radians for hipy/both cases")
+    parser.add_argument("--knee-delta", type=float, default=-0.1,
+                        help="FR Knee target offset in radians for knee/both cases")
+    parser.add_argument("--cases", nargs="+",
+                        choices=("baseline", "baseline_repeat", "hipy", "knee", "both"),
+                        default=("baseline", "hipy", "knee", "both"))
     args = parser.parse_args()
     if not args.checkpoint.is_file():
         parser.error(f"checkpoint missing: {args.checkpoint}")
+    if not all(-0.15 <= value <= 0.15 for value in (args.hipy_delta, args.knee_delta)):
+        parser.error("joint probe offsets must be finite and within +/-0.15 rad")
+    if len(set(args.cases)) != len(args.cases):
+        parser.error("--cases must be unique")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     summary = []
-    for case, hipy, knee in (("baseline", 0., 0.), ("hipy", -.1, 0.),
-                             ("knee", 0., -.1), ("both", -.1, -.1)):
+    offsets = {
+        "baseline": (0., 0.), "baseline_repeat": (0., 0.),
+        "hipy": (args.hipy_delta, 0.), "knee": (0., args.knee_delta),
+        "both": (args.hipy_delta, args.knee_delta),
+    }
+    for case in args.cases:
+        hipy, knee = offsets[case]
         output = args.output_dir / f"{case}.json"
         print(f"Running {case}: HipY {hipy:+.2f}, Knee {knee:+.2f} rad", flush=True)
         subprocess.run([
@@ -50,7 +66,8 @@ def main():
         })
     result = {"checkpoint": str(args.checkpoint), "terrain_level": args.terrain_level,
               "vx": args.vx, "num_envs": args.num_envs, "seconds": args.seconds,
-              "seed": args.seed, "cases": summary}
+              "seed": args.seed, "hipy_delta_rad": args.hipy_delta,
+              "knee_delta_rad": args.knee_delta, "cases": summary}
     dest = args.output_dir / "comparison.json"
     dest.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2), flush=True)
