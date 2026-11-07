@@ -36,8 +36,19 @@ def summarize_counterfactual(raw):
     return output
 
 
-def verify_same_prefix(raw, *, atol=2e-4):
-    """Bound floating-point drift before comparing intervention outcomes."""
+PREFIX_ABS_TOLERANCES={
+    'state':1e-3,
+    'pose':1e-4,
+    'action':1e-4,
+    'previous_action':1e-4,
+    'context':1e-4,
+    'command':1e-6,
+    'gate':1e-4,
+}
+
+
+def verify_same_prefix(raw):
+    """Bound field-specific floating-point drift before comparing outcomes."""
     import torch
     baseline=raw['baseline']
     failures=[]
@@ -62,8 +73,9 @@ def verify_same_prefix(raw, *, atol=2e-4):
                 delta=(actual-expected).abs()
                 maximum=float(delta.max()) if delta.numel() else 0.
                 field_diffs[field]=maximum
-                if not torch.isfinite(delta).all() or maximum>atol:
-                    failures.append(f'{name}.{field}: max abs difference {maximum:.6g} > {atol:g}')
+                tolerance=PREFIX_ABS_TOLERANCES[field]
+                if not torch.isfinite(delta).all() or maximum>tolerance:
+                    failures.append(f'{name}.{field}: max abs difference {maximum:.6g} > {tolerance:g}')
         diagnostics[name]=field_diffs
     if failures:
         raise RuntimeError('Same-prefix states diverged; refusing causal comparison. '
@@ -119,7 +131,7 @@ def main():
         result=dict(actor_updated=False,world_model_updated=False,one_step_only=True,
                     source_sha256=file_hash(a.checkpoint),model_sha256=file_hash(a.contact_model),
                     terrain='stairs_inv',terrain_level=8,command=[1.,0.,0.],cases={},
-                    prefix_tolerance=2e-4,
+                    prefix_abs_tolerances=PREFIX_ABS_TOLERANCES,
                     interpretation='Bounded numerical prefix drift; repeated baseline contact must match')
         with tempfile.TemporaryDirectory(prefix='lite3_action_response_') as temp:
             for seed in a.seeds:

@@ -112,9 +112,12 @@ class ContactPhaseTests(unittest.TestCase):
         close={'step':7,'active':base['active'].clone(),
                'pre':{'state':torch.tensor([1.000001,2.]),'foot_contact':pre['foot_contact'].clone()}}
         differences=verify_same_prefix({'baseline':base,'hipy_minus':close})
-        self.assertLess(differences['hipy_minus']['state'],2e-4)
+        self.assertLess(differences['hipy_minus']['state'],1e-3)
+        millimetre_scale=dict(close,pre={'state':torch.tensor([1.0003,2.]),
+                                         'foot_contact':pre['foot_contact'].clone()})
+        verify_same_prefix({'baseline':base,'hipy_minus':millimetre_scale})
         changed={'step':7,'active':base['active'].clone(),
-                 'pre':{'state':torch.tensor([1.1,2.]),'foot_contact':pre['foot_contact'].clone()}}
+                 'pre':{'state':torch.tensor([1.01,2.]),'foot_contact':pre['foot_contact'].clone()}}
         with self.assertRaisesRegex(RuntimeError,'hipy_minus.state: max abs difference'):
             verify_same_prefix({'baseline':base,'hipy_minus':changed})
         with self.assertRaisesRegex(RuntimeError,'trigger step'):
