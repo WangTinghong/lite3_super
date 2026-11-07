@@ -20,6 +20,8 @@ def summarize_counterfactual(raw):
         common &= ~item['done']
     if not bool(common.any()):
         raise ValueError('No common valid active transitions')
+    if not bool((reference['actual'] & common).any()):
+        raise ValueError('Selected baseline shank event is absent from common valid transitions')
     output={}
     for name,item in raw.items():
         e=dict(item['metadata'])
@@ -104,6 +106,11 @@ def verify_null_response(raw, *, probability_atol=0.01):
                 discrete_contact_outcomes_identical=True)
 
 
+def baseline_contact_event(active, shank_only, min_active):
+    """Select an informative baseline step, before comparing counterfactuals."""
+    return int(active.sum())>=min_active and bool((active & shank_only).any())
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--checkpoint',required=True)
@@ -111,12 +118,13 @@ def main():
     p.add_argument('--output',default='audit/action_response/summary.json')
     p.add_argument('--seeds',type=int,nargs='+',default=[3,4,5])
     p.add_argument('--num-envs',type=int,default=64)
-    p.add_argument('--max-seconds',type=float,default=20.)
+    p.add_argument('--max-seconds',type=float,default=40.)
     p.add_argument('--min-active',type=int,default=4)
     p.add_argument('--device',default='cuda:0')
     p.add_argument('--worker',action='store_true',help=argparse.SUPPRESS)
     p.add_argument('--case',choices=('baseline','baseline_repeat','hipy_minus','hipy_plus','knee_minus','knee_plus'),help=argparse.SUPPRESS)
     p.add_argument('--raw-output',help=argparse.SUPPRESS)
+    p.add_argument('--trigger-step',type=int,default=-1,help=argparse.SUPPRESS)
     a=p.parse_args()
     if len(set(a.seeds))!=len(a.seeds) or any(s<3 for s in a.seeds): p.error('Use unique unused seeds >=3')
     if min(a.num_envs,a.max_seconds,a.min_active)<=0: p.error('Positive counts/seconds required')
@@ -132,10 +140,12 @@ def main():
                     source_sha256=file_hash(a.checkpoint),model_sha256=file_hash(a.contact_model),
                     terrain='stairs_inv',terrain_level=8,command=[1.,0.,0.],cases={},
                     prefix_abs_tolerances=PREFIX_ABS_TOLERANCES,
-                    interpretation='Bounded numerical prefix drift; repeated baseline contact must match')
+                    event_selection='First baseline step with >=min-active gait gates and at least one active FR shank-only contact',
+                    interpretation='Event-conditioned one-step response with bounded numerical prefix drift and repeated baseline control')
         with tempfile.TemporaryDirectory(prefix='lite3_action_response_') as temp:
             for seed in a.seeds:
                 seed_raw={}
+                trigger_step=None
                 for name,_,_ in cases:
                     raw_path=Path(temp)/f'{seed}_{name}.pt'
                     command=[sys.executable,'-u',str(Path(__file__).resolve()),
@@ -144,10 +154,14 @@ def main():
                              '--max-seconds',str(a.max_seconds),'--min-active',str(a.min_active),
                              '--device',a.device,'--worker','--case',name,
                              '--raw-output',str(raw_path)]
+                    if trigger_step is not None:
+                        command.extend(['--trigger-step',str(trigger_step)])
                     worker_env=child_environment()
                     worker_env['PYTHONHASHSEED']=str(seed)
                     subprocess.run(command,env=worker_env,check=True)
                     seed_raw[name]=torch.load(raw_path,map_location='cpu',weights_only=False)
+                    if name=='baseline':
+                        trigger_step=seed_raw[name]['step']
                 differences=verify_same_prefix(seed_raw)
                 null_control=verify_null_response(seed_raw)
                 result['cases'][str(seed)]=summarize_counterfactual(seed_raw)
@@ -161,6 +175,8 @@ def main():
         return
     if a.case is None or a.raw_output is None or len(a.seeds)!=1:
         p.error('--worker requires one --case, one --seeds value, and --raw-output')
+    if a.case!='baseline' and a.trigger_step<0:
+        p.error('Non-baseline workers require --trigger-step')
     import random
     import numpy as np
     import torch
@@ -216,19 +232,35 @@ def main():
                         _,gate=front_leg_probe(action,s0,p0,cmd,term.height_field,
                                                 foot0,scale,-.1,0.)
                         active=(gate>.01)
-                        if int(active.sum())>=a.min_active:
+                        if a.trigger_step>=0 and step==a.trigger_step and int(active.sum())<a.min_active:
+                            raise RuntimeError(f'Seed {seed}, {name}: only {int(active.sum())} active envs at baseline trigger step {step}')
+                        eligible=int(active.sum())>=a.min_active
+                        evaluate=eligible and (a.trigger_step<0 or step==a.trigger_step)
+                        if eligible:
+                            pre_gpu=dict(state=s0,pose=p0,action=action,previous_action=prev,
+                                         context=context,foot_contact=foot0,command=cmd,gate=gate)
+                            pre_gpu={key:value.detach().clone() for key,value in pre_gpu.items()}
+                        if evaluate:
                             adjusted,_=front_leg_probe(action,s0,p0,cmd,term.height_field,
                                                        foot0,scale,hipy,knee)
-                            # In baseline, the probe function returns original actions.
-                            pre=dict(state=s0,pose=p0,action=action,previous_action=prev,
-                                     context=context,foot_contact=foot0,command=cmd,gate=gate)
-                            pre={key:value.detach().cpu().clone() for key,value in pre.items()}
-                            relief=tr.relief(p0[:,:2],p0[:,2],term.height_field)
-                            _,_,logits=wm.predict(s0,adjusted,prev,context,relief)
-                            obs,_,terminated,truncated,_=env.step(adjusted)
+                        else:
+                            adjusted=action
+                        if eligible:
+                            tested_action=adjusted.detach().clone()
+                        obs,_,terminated,truncated,_=env.step(adjusted)
+                        done=terminated|truncated
+                        if eligible:
                             feet1,_=read_contacts(env.scene['feet_ground_contact'])
                             shanks1,_=read_shank_contacts(env.scene['shanks_ground_contact'])
                             shank_only=shanks1[:,0] & ~feet1[:,0]
+                            selected=evaluate and (a.trigger_step>=0 or baseline_contact_event(active & ~done,shank_only,a.min_active))
+                        else:
+                            selected=False
+                        if selected:
+                            pre={key:value.cpu() for key,value in pre_gpu.items()}
+                            relief=tr.relief(pre_gpu['pose'][:,:2],pre_gpu['pose'][:,2],term.height_field)
+                            _,_,logits=wm.predict(pre_gpu['state'],tested_action,pre_gpu['previous_action'],
+                                                  pre_gpu['context'],relief)
                             raw=dict(
                                 step=step,pre=pre,
                                 active=active.detach().cpu().clone(),
@@ -238,19 +270,18 @@ def main():
                                 foot=feet1[:,0].detach().cpu().clone(),
                                 metadata=dict(step=step,active=int(active.sum()),
                                     falls=int(terminated.sum()),
+                                    active_fr_shank_only=int((active & shank_only).sum()),
                                     action_target_hipy_delta_rad=hipy,action_target_knee_delta_rad=knee,
                                     mean_gate=float(gate[active].mean()),
-                                    fr_hipy_action_delta=float((adjusted[active,4]-action[active,4]).mean()),
-                                    fr_knee_action_delta=float((adjusted[active,5]-action[active,5]).mean())))
+                                    fr_hipy_action_delta=float((tested_action[active,4]-pre_gpu['action'][active,4]).mean()),
+                                    fr_knee_action_delta=float((tested_action[active,5]-pre_gpu['action'][active,5]).mean())))
                             event=True
                             break
-                        obs,_,terminated,truncated,_=env.step(action)
-                        done=terminated|truncated
-                        prev=torch.where(done[:,None],torch.zeros_like(action),action)
+                        prev=torch.where(done[:,None],torch.zeros_like(adjusted),adjusted)
                         if done.any(): obs,_=env.reset(env_ids=done.nonzero().flatten())
                 if event is None:
-                    raise RuntimeError(f'No common stair approach with {a.min_active} active envs in seed {seed}; extend --max-seconds or lower --min-active')
-                print(f'seed {seed}, {name}: same-prefix intervention at step {step}; active={int(active.sum())}',flush=True)
+                    raise RuntimeError(f'No FR shank-only baseline event with {a.min_active} active envs in seed {seed}; extend --max-seconds or --num-envs')
+                print(f'seed {seed}, {name}: intervention at step {step}; active={int(active.sum())}, shank-only={int((active & shank_only).sum())}',flush=True)
             finally:
                 env.close()
         torch.save(raw,a.raw_output)

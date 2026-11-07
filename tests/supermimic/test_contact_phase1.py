@@ -104,6 +104,9 @@ class ContactPhaseTests(unittest.TestCase):
             summarize_counterfactual({'baseline':base,'hipy_minus':dict(changed,active=~active)})
         with self.assertRaisesRegex(ValueError,'No common valid'):
             summarize_counterfactual({'baseline':dict(base,done=active),'hipy_minus':changed})
+        with self.assertRaisesRegex(ValueError,'Selected baseline shank event'):
+            summarize_counterfactual({'baseline':dict(base,actual=torch.zeros(3,dtype=torch.bool)),
+                                      'hipy_minus':changed})
 
     def test_action_response_prefix_guard_reports_field(self):
         from scripts.audit_action_response import verify_same_prefix
@@ -135,6 +138,13 @@ class ContactPhaseTests(unittest.TestCase):
         repeat['actual'][1]=False
         with self.assertRaisesRegex(RuntimeError,'actual: 1 active outcomes differ'):
             verify_null_response({'baseline':original,'baseline_repeat':repeat})
+
+    def test_action_response_selects_real_shank_event(self):
+        from scripts.audit_action_response import baseline_contact_event
+        active=torch.tensor([True,True,True,True,False])
+        self.assertFalse(baseline_contact_event(active,torch.tensor([False,False,False,False,True]),4))
+        self.assertTrue(baseline_contact_event(active,torch.tensor([False,True,False,False,False]),4))
+        self.assertFalse(baseline_contact_event(active,torch.tensor([False,True,False,False,False]),5))
 
     def test_probability_ranking_and_ties(self):
         truth = torch.tensor([True, False, True, False])
