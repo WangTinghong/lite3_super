@@ -97,6 +97,7 @@ class ContactPhaseTests(unittest.TestCase):
                      foot=torch.tensor([True,False,True]),metadata={'step':20})
         report=summarize_counterfactual({'baseline':base,'hipy_minus':changed})
         self.assertEqual(report['baseline']['common_valid'],1)
+        self.assertEqual(report['baseline']['common_baseline_shank_events'],1)
         self.assertEqual(report['hipy_minus']['common_valid'],1)
         self.assertAlmostEqual(report['hipy_minus']['actual_risk_delta_vs_baseline'],-1.)
         self.assertAlmostEqual(report['hipy_minus']['predicted_risk_delta_vs_baseline'],-.6,places=6)
@@ -114,15 +115,18 @@ class ContactPhaseTests(unittest.TestCase):
         base={'step':7,'active':torch.tensor([True,False]),'pre':pre}
         close={'step':7,'active':base['active'].clone(),
                'pre':{'state':torch.tensor([1.000001,2.]),'foot_contact':pre['foot_contact'].clone()}}
-        differences=verify_same_prefix({'baseline':base,'hipy_minus':close})
-        self.assertLess(differences['hipy_minus']['state'],1e-3)
+        matched,diagnostics=verify_same_prefix({'baseline':base,'hipy_minus':close})
+        self.assertTrue(bool(matched.all()))
+        self.assertLess(diagnostics['per_case']['hipy_minus']['maximum_difference']['state'],1e-3)
         millimetre_scale=dict(close,pre={'state':torch.tensor([1.0003,2.]),
                                          'foot_contact':pre['foot_contact'].clone()})
         verify_same_prefix({'baseline':base,'hipy_minus':millimetre_scale})
         changed={'step':7,'active':base['active'].clone(),
                  'pre':{'state':torch.tensor([1.01,2.]),'foot_contact':pre['foot_contact'].clone()}}
-        with self.assertRaisesRegex(RuntimeError,'hipy_minus.state: max abs difference'):
-            verify_same_prefix({'baseline':base,'hipy_minus':changed})
+        matched,diagnostics=verify_same_prefix({'baseline':base,'hipy_minus':changed})
+        self.assertFalse(bool(matched[0]))
+        self.assertTrue(bool(matched[1]))
+        self.assertEqual(diagnostics['dropped_active'],1)
         with self.assertRaisesRegex(RuntimeError,'trigger step'):
             verify_same_prefix({'baseline':base,'hipy_minus':dict(close,step=8)})
 

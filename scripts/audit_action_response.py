@@ -9,23 +9,25 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 
-def summarize_counterfactual(raw):
+def summarize_counterfactual(raw, matched=None, min_active=1):
     import torch
     reference=raw['baseline']
     active=reference['active']
-    common=active.clone()
+    common=active.clone() if matched is None else (active & matched)
     for item in raw.values():
-        if not torch.equal(item['active'],active):
-            raise ValueError('Active masks differ across cases')
+        if not torch.equal(item['active'][common],active[common]):
+            raise ValueError('Active masks differ across matched cases')
         common &= ~item['done']
-    if not bool(common.any()):
-        raise ValueError('No common valid active transitions')
+    if int(common.sum())<min_active:
+        raise ValueError(f'No common valid active transitions: {int(common.sum())} < {min_active}')
     if not bool((reference['actual'] & common).any()):
         raise ValueError('Selected baseline shank event is absent from common valid transitions')
     output={}
+    baseline_events=int((reference['actual'] & common).sum())
     for name,item in raw.items():
         e=dict(item['metadata'])
         e['common_valid']=int(common.sum())
+        e['common_baseline_shank_events']=baseline_events
         e['predicted_fr_shank_only_probability']=float(item['prob'][common].mean())
         e['actual_fr_shank_only_fraction']=float(item['actual'][common].float().mean())
         e['fr_foot_contact_fraction']=float(item['foot'][common].float().mean())
@@ -50,47 +52,56 @@ PREFIX_ABS_TOLERANCES={
 
 
 def verify_same_prefix(raw):
-    """Bound field-specific floating-point drift before comparing outcomes."""
+    """Match individual worlds whose pre-intervention states stay within bounds."""
     import torch
     baseline=raw['baseline']
-    failures=[]
+    n=len(baseline['active'])
+    matched=torch.ones(n,dtype=torch.bool)
     diagnostics={}
     for name,item in raw.items():
         if name=='baseline': continue
         if item['step']!=baseline['step']:
-            failures.append(f'{name}: trigger step {item["step"]} != {baseline["step"]}')
-        if not torch.equal(item['active'],baseline['active']):
-            failures.append(f'{name}: active masks differ')
+            raise RuntimeError(f'{name}: trigger step {item["step"]} != baseline {baseline["step"]}')
+        if item['active'].shape!=baseline['active'].shape:
+            raise RuntimeError(f'{name}: active mask shape differs')
+        case_match=item['active']==baseline['active']
         field_diffs={}
+        dropped_by_field={}
         for field,expected in baseline['pre'].items():
             actual=item['pre'][field]
             if expected.shape!=actual.shape:
-                failures.append(f'{name}.{field}: shape {tuple(actual.shape)} != {tuple(expected.shape)}')
-                continue
+                raise RuntimeError(f'{name}.{field}: shape {tuple(actual.shape)} != {tuple(expected.shape)}')
+            if expected.shape[0]!=n:
+                raise RuntimeError(f'{name}.{field}: missing environment dimension')
             if expected.dtype==torch.bool:
-                differences=int((actual!=expected).sum())
-                field_diffs[field]=differences
-                if differences: failures.append(f'{name}.{field}: {differences} boolean entries differ')
+                per_env_equal=(actual==expected).reshape(n,-1).all(1)
+                field_diffs[field]=int((~per_env_equal).sum())
             else:
-                delta=(actual-expected).abs()
-                maximum=float(delta.max()) if delta.numel() else 0.
-                field_diffs[field]=maximum
+                delta=(actual-expected).abs().reshape(n,-1).amax(1)
+                field_diffs[field]=float(delta.max())
                 tolerance=PREFIX_ABS_TOLERANCES[field]
-                if not torch.isfinite(delta).all() or maximum>tolerance:
-                    failures.append(f'{name}.{field}: max abs difference {maximum:.6g} > {tolerance:g}')
-        diagnostics[name]=field_diffs
-    if failures:
-        raise RuntimeError('Same-prefix states diverged; refusing causal comparison. '
-                           + '; '.join(failures))
-    return diagnostics
+                per_env_equal=torch.isfinite(delta) & (delta<=tolerance)
+            dropped_by_field[field]=int((~per_env_equal & baseline['active']).sum())
+            case_match &= per_env_equal
+        matched &= case_match
+        diagnostics[name]=dict(matched_envs=int(case_match.sum()),
+                               matched_active=int((case_match & baseline['active']).sum()),
+                               maximum_difference=field_diffs,
+                               dropped_active_by_field=dropped_by_field)
+    return matched,dict(total_envs=n,baseline_active=int(baseline['active'].sum()),
+                        matched_envs=int(matched.sum()),matched_active=int((matched & baseline['active']).sum()),
+                        dropped_active=int((~matched & baseline['active']).sum()),
+                        per_case=diagnostics)
 
 
-def verify_null_response(raw, *, probability_atol=0.01):
+def verify_null_response(raw, matched=None, *, probability_atol=0.01):
     """A repeated baseline must give the same discrete next-step contact result."""
     import torch
     reference=raw['baseline']
     repeated=raw['baseline_repeat']
-    active=reference['active']
+    active=reference['active'] if matched is None else (reference['active'] & matched)
+    if not bool(active.any()):
+        raise RuntimeError('No matched active environments for repeated baseline')
     failures=[]
     for field in ('done','actual','foot'):
         differing=int((reference[field][active]!=repeated[field][active]).sum())
@@ -162,10 +173,14 @@ def main():
                     seed_raw[name]=torch.load(raw_path,map_location='cpu',weights_only=False)
                     if name=='baseline':
                         trigger_step=seed_raw[name]['step']
-                differences=verify_same_prefix(seed_raw)
-                null_control=verify_null_response(seed_raw)
-                result['cases'][str(seed)]=summarize_counterfactual(seed_raw)
-                result.setdefault('prefix_max_abs_difference',{})[str(seed)]=differences
+                matched,matching=verify_same_prefix(seed_raw)
+                if matching['matched_active']<a.min_active:
+                    raise RuntimeError(f'Seed {seed}: only {matching["matched_active"]} of '
+                                       f'{matching["baseline_active"]} active environments have matched prefixes; '
+                                       f'need {a.min_active}. Matching details: {json.dumps(matching)}')
+                null_control=verify_null_response(seed_raw,matched)
+                result['cases'][str(seed)]=summarize_counterfactual(seed_raw,matched,a.min_active)
+                result.setdefault('prefix_matching',{})[str(seed)]=matching
                 result.setdefault('null_control',{})[str(seed)]=null_control
                 print(f'seed {seed}: bounded-prefix and repeated-baseline checks passed',flush=True)
         out.parent.mkdir(parents=True,exist_ok=True)
