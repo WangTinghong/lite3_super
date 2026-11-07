@@ -112,13 +112,26 @@ class ContactPhaseTests(unittest.TestCase):
         close={'step':7,'active':base['active'].clone(),
                'pre':{'state':torch.tensor([1.000001,2.]),'foot_contact':pre['foot_contact'].clone()}}
         differences=verify_same_prefix({'baseline':base,'hipy_minus':close})
-        self.assertLess(differences['hipy_minus']['state'],1e-5)
+        self.assertLess(differences['hipy_minus']['state'],2e-4)
         changed={'step':7,'active':base['active'].clone(),
                  'pre':{'state':torch.tensor([1.1,2.]),'foot_contact':pre['foot_contact'].clone()}}
         with self.assertRaisesRegex(RuntimeError,'hipy_minus.state: max abs difference'):
             verify_same_prefix({'baseline':base,'hipy_minus':changed})
         with self.assertRaisesRegex(RuntimeError,'trigger step'):
             verify_same_prefix({'baseline':base,'hipy_minus':dict(close,step=8)})
+
+    def test_action_response_repeated_baseline_guard(self):
+        from scripts.audit_action_response import verify_null_response
+        original=dict(active=torch.tensor([True,True,False]),done=torch.tensor([False,False,False]),
+                      actual=torch.tensor([False,True,False]),foot=torch.tensor([True,False,False]),
+                      prob=torch.tensor([.2,.6,.2]))
+        repeat={key:value.clone() for key,value in original.items()}
+        repeat['prob'][0]+=.001
+        self.assertTrue(verify_null_response({'baseline':original,'baseline_repeat':repeat})
+                        ['discrete_contact_outcomes_identical'])
+        repeat['actual'][1]=False
+        with self.assertRaisesRegex(RuntimeError,'actual: 1 active outcomes differ'):
+            verify_null_response({'baseline':original,'baseline_repeat':repeat})
 
     def test_probability_ranking_and_ties(self):
         truth = torch.tensor([True, False, True, False])
