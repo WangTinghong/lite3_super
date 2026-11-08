@@ -38,3 +38,27 @@ The 20-second, single-seed test screens directions, not robustness; any useful
 case then needs other seeds, lower speed and a visual check before training.
 If all cases worsen, retain the baseline and investigate foot placement and
 body height instead of forcing these joint offsets into a reward.
+
+## Rear-right outward swing check
+
+A 30 s, one-robot trace of the policy-anchor 100-step candidate at level-8
+ascending stairs showed 115/1500 frames with HR HipX above 0.5 rad. None of
+those frames had HR foot contact. In those frames the mean target was 0.628 rad,
+and the right-rear foot lateral coordinate was -0.323 m, versus -0.185 m when
+HipX was at most 0.25 rad. Target changes lead the measured joint angle by
+roughly 1-3 control frames. This supports a commanded outward swing in that
+trace, rather than a stance foot being pushed outward by the stair.
+
+The same trace recorded FR shank contact without foot contact in 136/1500
+frames, across 57 short events. The FR foot was on average 0.118 m above its
+sampled local ground during those frames, so ordinary foot clearance alone
+does not explain contact with the stair's vertical face. These observations
+come from one seed and do not establish a successful corrective action.
+
+`eval_locomotion.py --probe-hr-hipx-cap 0.25` is an evaluation-only test: on
+straight forward motion it caps the right-rear HipX target at 0.25 rad only
+while the right-rear foot is airborne. The value zero disables the probe.
+Compare it against the same checkpoint, seed, environment count and duration
+without the probe. Inspect right-rear outward angle, forward progress, falls,
+stall and FR contact together. This flag changes no training configuration or
+saved checkpoint and is not a proposed deployed controller.

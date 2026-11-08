@@ -24,3 +24,26 @@ def front_leg_probe(action, state, pose, command, field, foot_contact,
     adjusted[:, 4] += gate * hipy_delta / scale[:, 4]
     adjusted[:, 5] += gate * knee_delta / scale[:, 5]
     return adjusted, gate
+
+
+def rear_right_hipx_cap(action, command, foot_contact, default_q, action_scale,
+                        cap_rad=0.0):
+    """Evaluation-only cap on outward HR HipX targets during forward swing.
+
+    The Lite3 HR HipX axis has positive outward rotation. This probe changes
+    only the HR HipX action (index 9), and only when its foot is airborne.
+    It is intentionally separate from the learned actor and training rewards.
+    """
+    active = torch.zeros(len(action), dtype=torch.bool, device=action.device)
+    if cap_rad <= 0:
+        return action, active
+    scale = torch.broadcast_to(action_scale, action.shape)
+    default = torch.broadcast_to(default_q, action.shape)
+    target = default[:, 9] + action[:, 9] * scale[:, 9]
+    forward = ((command[:, 0] > 0.1) & (command[:, 1].abs() < 0.05)
+               & (command[:, 2].abs() < 0.05))
+    active = forward & ~foot_contact[:, 2] & (target > cap_rad)
+    adjusted = action.clone()
+    capped_action = (cap_rad - default[:, 9]) / scale[:, 9]
+    adjusted[:, 9] = torch.where(active, capped_action, action[:, 9])
+    return adjusted, active

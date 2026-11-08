@@ -40,10 +40,14 @@ def main():
     parser.add_argument("--contact-data", help="New empty directory for offline contact WM transitions and terrain audit")
     parser.add_argument("--probe-fr-hipy", type=float, default=0.0, help="Evaluation-only FR HipY target offset in radians, max magnitude 0.15")
     parser.add_argument("--probe-fr-knee", type=float, default=0.0, help="Evaluation-only FR Knee target offset in radians, max magnitude 0.15")
+    parser.add_argument("--probe-hr-hipx-cap", type=float, default=0.0,
+                        help="Evaluation-only cap in radians on outward HR HipX swing target; 0 disables")
     args = parser.parse_args()
     if not all(-0.15 <= v <= 0.15 for v in (args.probe_fr_hipy, args.probe_fr_knee)):
         parser.error("joint probe offsets must be finite and within +/-0.15 rad")
-    probe_on = bool(args.probe_fr_hipy or args.probe_fr_knee)
+    if not 0 <= args.probe_hr_hipx_cap <= 0.5:
+        parser.error("--probe-hr-hipx-cap must be in [0, 0.5] rad")
+    probe_on = bool(args.probe_fr_hipy or args.probe_fr_knee or args.probe_hr_hipx_cap)
     if args.num_envs <= 0 or args.seconds <= 0:
         parser.error("num-envs and seconds must be positive")
     if args.viewer and args.video:
@@ -103,24 +107,29 @@ def main():
         actor = Actor(obs["actor"].shape[-1], tuple(ckpt["cfg"]["actor_hidden"]), 12).to(env.device)
         actor.load_state_dict(ckpt["actor"])
         actor.eval()
-        probe_scale = st.robot_consts(env).action_scale if probe_on else None
-        probe_stats = {"samples": 0, "active": 0, "gate_sum": 0.0}
+        probe_consts = st.robot_consts(env) if probe_on else None
+        probe_stats = {"samples": 0, "active": 0, "gate_sum": 0.0, "hr_active": 0}
 
         def get_action(ob, state=None, pose=None, command=None):
             action = actor(ob["actor"])
             if not probe_on:
                 return action
-            from lite3_supermimic.locomotion.stair_probe import front_leg_probe
+            from lite3_supermimic.locomotion.stair_probe import front_leg_probe, rear_right_hipx_cap
             term = env.command_manager.get_term("velocity")
             state = st.robot_state(env, term.height_field) if state is None else state
             pose = st.planar_pose(env) if pose is None else pose
             command = term.command if command is None else command
             contact, _ = read_contacts(env.scene["feet_ground_contact"])
             action, gate = front_leg_probe(action, state, pose, command, term.height_field,
-                                          contact, probe_scale, args.probe_fr_hipy, args.probe_fr_knee)
+                                          contact, probe_consts.action_scale,
+                                          args.probe_fr_hipy, args.probe_fr_knee)
+            action, hr_active = rear_right_hipx_cap(
+                action, command, contact, probe_consts.default_q,
+                probe_consts.action_scale, args.probe_hr_hipx_cap)
             probe_stats["samples"] += len(action)
             probe_stats["active"] += int((gate > 0).sum())
             probe_stats["gate_sum"] += float(gate.sum())
+            probe_stats["hr_active"] += int(hr_active.sum())
             return action
         wm_audit = ctx = recorder = geometry = None
         if args.wm_audit or args.contact_data:
@@ -151,6 +160,7 @@ def main():
                 "action_source": "frozen_actor_plus_gated_probe" if probe_on else "frozen_actor",
                 "probe_fr_hipy_rad": args.probe_fr_hipy,
                 "probe_fr_knee_rad": args.probe_fr_knee,
+                "probe_hr_hipx_cap_rad": args.probe_hr_hipx_cap,
                 "versions": versions,
                 "contact_timing": "post-step, before manual reset",
             })
@@ -286,8 +296,10 @@ def main():
         result["action_probe"] = {
             "enabled": probe_on, "fr_hipy_delta_rad": args.probe_fr_hipy,
             "fr_knee_delta_rad": args.probe_fr_knee,
+            "hr_hipx_cap_rad": args.probe_hr_hipx_cap,
             "active_fraction": probe_stats["active"] / max(1, probe_stats["samples"]),
             "mean_gate": probe_stats["gate_sum"] / max(1, probe_stats["samples"]),
+            "hr_active_fraction": probe_stats["hr_active"] / max(1, probe_stats["samples"]),
         }
         print(json.dumps(result, indent=2))
         if args.output:
