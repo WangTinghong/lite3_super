@@ -36,6 +36,7 @@ class TrainCfg(BaseCfg):
     hipx_target_refine: bool = False
     amp_motion_dir: str = ""
     contact_wm_init: str = ""
+    reset_wm_optimizer: bool = False
     amp_weight: float = 0.5
     amp_start_iteration: int = 500
     amp_ramp_iterations: int = 1000
@@ -220,6 +221,9 @@ class Trainer(BaseTrainer):
         ckpt = torch.load(path, map_location=self.dev, weights_only=False)
         validate_checkpoint(ckpt)
         super().load(path)
+        if self.cfg.reset_wm_optimizer:
+            self.opt_wm.state.clear()
+            print("world-model optimiser moments reset for controlled pilot", flush=True)
         if self.cfg.contact_wm_init:
             from .contact_model import initialize_dynamics
             from .contact_data import file_hash
