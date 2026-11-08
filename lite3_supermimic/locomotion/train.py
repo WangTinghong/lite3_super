@@ -45,6 +45,7 @@ class TrainCfg(BaseCfg):
     amp_lr: float = 1e-4
     gait_anchor_weight: float = 0.0
     policy_anchor_weight: float = 0.0
+    stair_repair: bool = False
     harder_stairs: bool = False
     stair_refine: bool = False
     task: str = TASKS["flat"]
@@ -87,6 +88,13 @@ class TrainCfg(BaseCfg):
         if self.policy_anchor_weight < 0 or (self.policy_anchor_weight > 0 and
                                              (self.stage != "terrain" or not self.resume)):
             raise ValueError("--policy-anchor-weight requires a terrain run resumed from a checkpoint")
+        if self.stair_repair and (self.stage != "terrain" or not self.harder_stairs
+                                  or not self.resume or self.policy_anchor_weight <= 0
+                                  or self.stair_refine or self.contact_wm_init
+                                  or self.gait_refine or self.hipx_refine
+                                  or self.hipx_target_refine):
+            raise ValueError("--stair-repair requires terrain, harder-stairs, resume, "
+                             "policy-anchor-weight > 0, and no other reward or WM experiment")
         if self.harder_stairs and self.stage != "terrain":
             raise ValueError("--harder-stairs requires --stage terrain")
         if self.stair_refine and (not self.harder_stairs or not self.resume or self.gait_refine):
@@ -113,6 +121,8 @@ class Trainer(BaseTrainer):
         if cfg.resume:
             checkpoint = torch.load(cfg.resume, map_location="cpu", weights_only=False)
             validate_checkpoint(checkpoint)
+            if cfg.stair_repair and cfg.continue_run and not checkpoint["cfg"].get("stair_repair", False):
+                raise ValueError("Start --stair-repair as a new run; omit --continue-run")
             changed_stage = checkpoint["cfg"]["stage"] != cfg.stage
             if bool(checkpoint["cfg"].get("gait_refine", False)) != cfg.gait_refine:
                 cfg.reset_critic = True  # The reward changed; the old value target is stale.
@@ -153,14 +163,16 @@ class Trainer(BaseTrainer):
         env_cfg.scene.num_envs, env_cfg.seed = cfg.num_envs, cfg.seed
         cmd_cfg = env_cfg.commands["velocity"]
         cmd_cfg.curriculum_steps = cfg.speed_curriculum_iterations * cfg.collect_steps
-        if cfg.stair_refine:
+        if cfg.stair_refine or cfg.stair_repair:
             env_cfg.scene.terrain.max_init_terrain_level = 8
-            cmd_cfg.stair_refine = True
+            # Repair uses the same challenging stair distribution, while its
+            # reward remains the source task's unchanged WEIGHTS.
+            cmd_cfg.stair_refine = cfg.stair_refine
             cmd_cfg.stair_focus_prob = 0.65
             cmd_cfg.min_terrain_level = 4
         self.env_cfg = env_cfg
         self.env = ManagerBasedRlEnv(cfg=env_cfg, device=cfg.device)
-        if cfg.stair_refine:
+        if cfg.stair_refine or cfg.stair_repair:
             terrain = self.env.scene.terrain
             terrain.terrain_levels.clamp_(min=cmd_cfg.min_terrain_level)
             terrain.env_origins[:] = terrain.terrain_origins[
@@ -245,6 +257,13 @@ class Trainer(BaseTrainer):
             self.policy_anchor_actor.load_state_dict(ckpt.get("policy_anchor_actor", ckpt["actor"]))
             self.policy_anchor_actor.eval()
             self.policy_anchor_actor.requires_grad_(False)
+        if self.cfg.stair_repair:
+            from .stair_repair import restrict_actor_outputs
+            if not self.cfg.continue_run:
+                self.opt_actor.state.clear()  # Old momentum may move masked output rows.
+            restrict_actor_outputs(self.actor)
+            print("stair repair: only FR HipY and HR HipX output rows trainable; "
+                  "actor observation normalizer frozen", flush=True)
         if self.amp is not None and "amp_style" in ckpt:
             self.amp.load_state_dict(ckpt["amp_style"])
             if "amp_optimizer" in ckpt:
@@ -291,7 +310,8 @@ class Trainer(BaseTrainer):
                 self.ep_stats["locomotion/yaw_error_radps"].append(
                     float((s1[keep, 9] - packed[keep, 2]).abs().mean()))
                 self.ep_stats["locomotion/speed_mps"].append(float(s1[keep, 4:6].norm(dim=-1).mean()))
-            self.actor.norm.update(self.obs)
+            if not cfg.stair_repair:
+                self.actor.norm.update(self.obs)
             self.window_falls += int(terminated.sum())
             self.window_steps += env.num_envs
             self.ou[done] = 0
@@ -320,6 +340,9 @@ class Trainer(BaseTrainer):
         return flight | (w["s"][:, :, 6].abs().amax(-1) > 0.6) | (w["valid"][:, -1] < 0.5)
 
     def save(self, it):
+        if self.cfg.stair_repair:
+            from .stair_repair import assert_restricted_actor
+            assert_restricted_actor(self.actor, self.policy_anchor_actor)
         path = self.log_dir / f"model_{it}.pt"
         terrain = self.env.scene.terrain
         data = dict(supermimic=True, robot="lite3", task_family=SCHEMA,
@@ -354,11 +377,21 @@ class Trainer(BaseTrainer):
         obs = seed["obs"]
         with torch.no_grad():
             reference = self.policy_anchor_actor(obs)
-        delta = self.actor(obs) - reference
+        actions = self.actor(obs)
+        delta = actions - reference
         mse = delta.square().mean()
         stats = {"policy_anchor_mse": float(mse.detach()),
                  "policy_anchor_mean_abs": float(delta.detach().abs().mean())}
-        return self.cfg.policy_anchor_weight * mse, stats
+        loss = self.cfg.policy_anchor_weight * mse
+        if self.cfg.stair_repair:
+            from .stair_repair import repair_penalty
+            repair, repair_stats = repair_penalty(
+                actions, reference, seed["s"], seed["pose"], seed["gen"][:, :3],
+                self.field, self.consts.action_scale[seed["env"]],
+                self.consts.default_q[seed["env"]])
+            loss = loss + repair
+            stats.update(repair_stats)
+        return loss, stats
 
     def retain_gait(self) -> dict[str, float]:
         """Rehearse the flat AMP actor on real, level, forward terrain states."""
