@@ -85,9 +85,6 @@ class TrainCfg(BaseCfg):
         if self.gait_anchor_weight < 0 or (self.gait_anchor_weight > 0 and
                                            (self.stage != "terrain" or not self.resume)):
             raise ValueError("--gait-anchor-weight requires a terrain run resumed from a checkpoint")
-        if self.policy_anchor_weight < 0 or (self.policy_anchor_weight > 0 and
-                                             (self.stage != "terrain" or not self.resume)):
-            raise ValueError("--policy-anchor-weight requires a terrain run resumed from a checkpoint")
         if self.stair_repair and (self.stage != "terrain" or not self.harder_stairs
                                   or not self.resume or self.policy_anchor_weight <= 0
                                   or self.stair_refine or self.contact_wm_init
@@ -95,6 +92,9 @@ class TrainCfg(BaseCfg):
                                   or self.hipx_target_refine):
             raise ValueError("--stair-repair requires terrain, harder-stairs, resume, "
                              "policy-anchor-weight > 0, and no other reward or WM experiment")
+        if self.policy_anchor_weight < 0 or (self.policy_anchor_weight > 0 and
+                                             (self.stage != "terrain" or not self.resume)):
+            raise ValueError("--policy-anchor-weight requires a terrain run resumed from a checkpoint")
         if self.harder_stairs and self.stage != "terrain":
             raise ValueError("--harder-stairs requires --stage terrain")
         if self.stair_refine and (not self.harder_stairs or not self.resume or self.gait_refine):
