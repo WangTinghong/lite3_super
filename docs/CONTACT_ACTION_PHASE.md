@@ -21,3 +21,27 @@ If a one-step paired audit has no actual contact changes, it cannot establish co
 Use the same source policy checkpoint that was recorded in the contact artifact. The loader verifies its SHA-256, installs only the continuous dynamics, clears stale world-model optimizer moments, and resets the critic. This starts a new run and cannot be combined with `--continue-run`. Compare the saved pilot policy against the unchanged source checkpoint with identical MuJoCo evaluation seeds and terrain settings before extending training.
 
 If the pilot regresses, run a matched control from the same source checkpoint and the same training arguments, omitting `--contact-wm-init` and adding `--reset-critic --reset-wm-optimizer`. This keeps the critic/optimizer reset conditions identical; the contact-supervised dynamics initialization is the intended experimental difference. Do not select checkpoints by imagined return alone. Reject a pilot that loses real forward progress or becomes more prone to stalling, even if its shank-only fraction falls.
+
+## Matched pilot outcome and policy-drift guard
+
+On level-8 ascending stairs at 1.0 m/s, seed 13, 128 environments for 40 s,
+the original 15000-step policy reached 0.757 m/s body-forward speed with a
+0.071 stall fraction and 0.446 m/s linear RMSE. At 200 pilot iterations, the
+contact-initialized actor reached 0.382 m/s, 0.218 stall fraction and 0.721
+RMSE; the matched control without contact initialization reached 0.403 m/s,
+0.242 stall fraction and 0.727 RMSE. Neither is acceptable. The contact model
+initialization is therefore not required for this regression. Reduced FR
+shank-only contact during the stalled gait is not evidence of improved climbing.
+The data do not isolate the exact source of the common actor drift.
+
+`--policy-anchor-weight` is an optional experiment that penalizes the new
+actor's action difference from the **resumed policy** on every sampled real
+replay state, including stair states. Its reference is saved separately from
+the existing flat-gait anchor. The penalty is added to the same actor loss as
+imagined return. A value of zero preserves the old update. The logged
+`policy_anchor_mse` and `policy_anchor_mean_abs` measure action drift on the
+sampled states; they are diagnostics, not locomotion scores. This regularizer
+does not prove that the baseline gait is optimal and does not repair contact
+predictions. Keep the original checkpoint and compare short pilots in MuJoCo
+before extending training. Evaluate forward progress, stall, tracking error,
+falls and shank-only contact together; confirm any apparent gain on fresh seeds.

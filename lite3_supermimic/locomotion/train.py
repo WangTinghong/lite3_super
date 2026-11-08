@@ -44,6 +44,7 @@ class TrainCfg(BaseCfg):
     amp_updates: int = 2
     amp_lr: float = 1e-4
     gait_anchor_weight: float = 0.0
+    policy_anchor_weight: float = 0.0
     harder_stairs: bool = False
     stair_refine: bool = False
     task: str = TASKS["flat"]
@@ -83,6 +84,9 @@ class TrainCfg(BaseCfg):
         if self.gait_anchor_weight < 0 or (self.gait_anchor_weight > 0 and
                                            (self.stage != "terrain" or not self.resume)):
             raise ValueError("--gait-anchor-weight requires a terrain run resumed from a checkpoint")
+        if self.policy_anchor_weight < 0 or (self.policy_anchor_weight > 0 and
+                                             (self.stage != "terrain" or not self.resume)):
+            raise ValueError("--policy-anchor-weight requires a terrain run resumed from a checkpoint")
         if self.harder_stairs and self.stage != "terrain":
             raise ValueError("--harder-stairs requires --stage terrain")
         if self.stair_refine and (not self.harder_stairs or not self.resume or self.gait_refine):
@@ -188,6 +192,8 @@ class Trainer(BaseTrainer):
         self.actor = Actor(obs_dim, cfg.actor_hidden, 12).to(self.dev)
         self.anchor_actor = (Actor(obs_dim, cfg.actor_hidden, 12).to(self.dev)
                              if cfg.gait_anchor_weight > 0 else None)
+        self.policy_anchor_actor = (Actor(obs_dim, cfg.actor_hidden, 12).to(self.dev)
+                                    if cfg.policy_anchor_weight > 0 else None)
         self.imag = Imagination(ImagineCfg(horizon=cfg.horizon, dt=self.env.step_dt,
                                 compile=cfg.compile, sensor_grad=cfg.sensor_grad, weights=self.weights),
                                 self.consts, self.term.stage, HISTORY, self.dev, self.field,
@@ -235,6 +241,10 @@ class Trainer(BaseTrainer):
             self.anchor_actor.load_state_dict(ckpt.get("gait_anchor_actor", ckpt["actor"]))
             self.anchor_actor.eval()
             self.anchor_actor.requires_grad_(False)
+        if self.policy_anchor_actor is not None:
+            self.policy_anchor_actor.load_state_dict(ckpt.get("policy_anchor_actor", ckpt["actor"]))
+            self.policy_anchor_actor.eval()
+            self.policy_anchor_actor.requires_grad_(False)
         if self.amp is not None and "amp_style" in ckpt:
             self.amp.load_state_dict(ckpt["amp_style"])
             if "amp_optimizer" in ckpt:
@@ -326,10 +336,29 @@ class Trainer(BaseTrainer):
             data["amp_optimizer"] = self.amp.optimizer.state_dict()
         if self.anchor_actor is not None:
             data["gait_anchor_actor"] = self.anchor_actor.state_dict()
+        if self.policy_anchor_actor is not None:
+            data["policy_anchor_actor"] = self.policy_anchor_actor.state_dict()
         temporary = path.with_suffix(".tmp")
         torch.save(data, temporary)
         temporary.replace(path)
         return path
+
+    def actor_penalty(self, seed: dict[str, torch.Tensor]) -> tuple[torch.Tensor, dict[str, float]]:
+        """Keep the new actor near the resumed policy on all real replay states.
+
+        This is a controlled guard against policy drift on stairs. It does not
+        use the contact classifier or assert that the old stair gait is ideal.
+        """
+        if self.cfg.policy_anchor_weight <= 0:
+            return seed["obs"].new_zeros(()), {}
+        obs = seed["obs"]
+        with torch.no_grad():
+            reference = self.policy_anchor_actor(obs)
+        delta = self.actor(obs) - reference
+        mse = delta.square().mean()
+        stats = {"policy_anchor_mse": float(mse.detach()),
+                 "policy_anchor_mean_abs": float(delta.detach().abs().mean())}
+        return self.cfg.policy_anchor_weight * mse, stats
 
     def retain_gait(self) -> dict[str, float]:
         """Rehearse the flat AMP actor on real, level, forward terrain states."""
@@ -376,7 +405,7 @@ class Trainer(BaseTrainer):
                     stats["amp_scale"] = self.imag.amp_scale
                 if it > self.policy_start:
                     stats.update(self.improve_policy())
-                    if self.anchor_actor is not None:
+                    if cfg.gait_anchor_weight > 0:
                         stats.update(self.retain_gait())
                     if self.amp is not None:
                         stats["amp_imagined_reward"] = self.imag.last_amp_reward

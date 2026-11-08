@@ -16,6 +16,8 @@ def test_flatness_gate_and_terrain_configuration(tmp_path):
     assert torch.equal(flatness_gate(relief), torch.tensor([1.0, 0.0]))
     with pytest.raises(ValueError, match="gait-anchor-weight"):
         TrainCfg(stage="terrain", gait_anchor_weight=0.2)
+    with pytest.raises(ValueError, match="policy-anchor-weight"):
+        TrainCfg(stage="terrain", policy_anchor_weight=1.0)
     for name in MOTION_RATES:
         (tmp_path / name).write_text("{}")
     cfg = TrainCfg(stage="terrain", amp_motion_dir=str(tmp_path), resume="source.pt",
@@ -46,3 +48,19 @@ def test_anchor_step_rehearses_only_level_forward_states():
     assert after < before
     trainer.buf.relief[..., 0] = 0.1
     assert trainer.retain_gait() == {"anchor_batch": 0.0}
+
+
+def test_policy_anchor_penalty_applies_on_all_replay_states():
+    trainer = Trainer.__new__(Trainer)
+    trainer.cfg = SimpleNamespace(policy_anchor_weight=2.0)
+    trainer.actor = torch.nn.Linear(2, 1, bias=False)
+    trainer.policy_anchor_actor = torch.nn.Linear(2, 1, bias=False)
+    with torch.no_grad():
+        trainer.actor.weight.fill_(1.0)
+        trainer.policy_anchor_actor.weight.zero_()
+    # No flatness or command filter: these observations may be stair states.
+    penalty, stats = trainer.actor_penalty({"obs": torch.tensor([[1.0, 0.0]])})
+    assert torch.isclose(penalty, torch.tensor(2.0))
+    assert stats["policy_anchor_mse"] == 1.0
+    penalty.backward()
+    assert trainer.actor.weight.grad[0, 0] > 0

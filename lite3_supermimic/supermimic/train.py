@@ -522,6 +522,10 @@ class Trainer:
 
   # Phase 3.
 
+  def actor_penalty(self, seed: dict[str, torch.Tensor]) -> tuple[torch.Tensor, dict[str, float]]:
+    """Optional task-specific constraint on actions at real replay states."""
+    return seed["obs"].new_zeros(()), {}
+
   def improve_policy(self) -> dict[str, float]:
     cfg, b = self.cfg, self.buf
     env, t = b.sample_states(cfg.imag_batch)
@@ -534,7 +538,8 @@ class Trainer:
       p.requires_grad_(False)
     hint = cfg.dodge_shaping * max(0.0, 1.0 - self.it / max(1, cfg.dodge_shaping_decay_iterations))
     objective, data = self.imag.rollout(self.wm, self.actor, self.critic, seed, hint)
-    loss = -objective.mean()
+    penalty, penalty_stats = self.actor_penalty(seed)
+    loss = -objective.mean() + penalty
     self.opt_actor.zero_grad(set_to_none=True)
     loss.backward()
     gnorm = clip_grads(self.actor.parameters(), cfg.grad_clip, cfg.grad_clip_elem)
@@ -571,6 +576,7 @@ class Trainer:
       "imagined_survival": data["surv"][:, -1].mean().item(),
       "actor_grad_norm": float(gnorm),
       "critic_loss": sum(c_losses) / len(c_losses),
+      **penalty_stats,
     }
 
   def save(self, it: int) -> Path:
