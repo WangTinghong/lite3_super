@@ -67,10 +67,15 @@ python scripts/eval_velocity.py --checkpoint <完整checkpoint> --seconds 60
 # 固定前进速度，自动选步态
 python scripts/eval_velocity.py --checkpoint <完整checkpoint> --vx 1.8 --seconds 30
 
+# 在远程桌面的终端打开 MuJoCo 实时窗口
+python scripts/eval_velocity.py --checkpoint <完整checkpoint> --viewer --vx 0.5 --seconds 30
+
 # 录像
 python scripts/eval_velocity.py --checkpoint <完整checkpoint> \
   --num-envs 1 --seconds 30 --video lite3_gait_switch.mp4
 ```
+
+使用 `--viewer` 时默认加载一个仿真环境，镜头跟随 Lite3。拖动鼠标调整视角，滚轮缩放，空格暂停或继续，回车重置机器人。关闭窗口后终端会输出已完成步数的评估指标。可同时传入 `--video` 保存录像。
 
 默认循环每段 5 秒，速度依次为 0、0.2、0.8、1.8、0.8、0 m/s。报告按站立／walk／trot／bound 分组的线速度 RMSE、偏航 RMSE、足端相位一致性和跌倒次数。低速权重应先在训练速度范围内评估，例如 `--vx 0.5`。足端相位一致性采用距地高度阈值估算接触。实际接触冲量和运动稳定性仍需要结合录像判断。
 
