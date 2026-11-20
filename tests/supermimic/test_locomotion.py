@@ -144,14 +144,17 @@ def test_hipx_reward_penalizes_both_sides_and_relaxes_during_maneuvers():
   assert grad[1] == 0
 
 
-def test_resuming_legacy_rewards_refits_critic_on_continued_timeline(tmp_path):
+@pytest.mark.parametrize('anchor_weight', [0.0, 2.0])
+def test_resuming_legacy_rewards_refits_critic_on_continued_timeline(tmp_path, anchor_weight):
   from dataclasses import asdict
   from lite3_supermimic.robot.constants import JOINT_NAMES
   from lite3_supermimic.supermimic.train import Actor, Critic, Trainer, TrainCfg
   from lite3_supermimic.supermimic.world_model import WorldModel
 
+  path = tmp_path / 'model_7000.pt'
   trainer = Trainer.__new__(Trainer)
-  trainer.cfg = TrainCfg(continue_run=True)
+  trainer.cfg = TrainCfg(continue_run=True, resume=str(path), actor_anchor_weight=anchor_weight)
+  trainer.actor_anchor = None
   trainer.dev, trainer.locomotion = 'cpu', True
   trainer.policy_start, trainer.actor_frozen_until = 300, 0
   trainer.obs = torch.zeros(1, 270)
@@ -165,16 +168,30 @@ def test_resuming_legacy_rewards_refits_critic_on_continued_timeline(tmp_path):
   old_weights = asdict(weights)
   old_weights.pop('hipx_deviation')
   old_critic = {key: torch.zeros_like(value) for key, value in initial_critic.items()}
-  path = tmp_path / 'model_7000.pt'
-  torch.save(dict(robot='lite3', joint_names=JOINT_NAMES, iteration=7000,
+  checkpoint = dict(robot='lite3', joint_names=JOINT_NAMES, iteration=7000,
                   cfg={'task': trainer.cfg.task}, gait_cfg=asdict(gait),
                   command_cfg={'reward_weights': old_weights}, critic=old_critic,
-                  actor=trainer.actor.state_dict(), world_model=trainer.wm.state_dict()), path)
+                  actor=trainer.actor.state_dict(), world_model=trainer.wm.state_dict())
+  torch.save(checkpoint, path)
   trainer.load(str(path))
   assert trainer.env.common_step_counter == trainer.start_it == 7000
   assert trainer.actor_frozen_until == 7500
   for key, value in trainer.critic.state_dict().items():
     torch.testing.assert_close(value, initial_critic[key])
+  if anchor_weight:
+    frozen_anchor = {key: value.clone() for key, value in trainer.actor_anchor.state_dict().items()}
+    assert all(not parameter.requires_grad for parameter in trainer.actor_anchor.parameters())
+    joint_bias = next(reversed(trainer.actor.net.state_dict()))
+    checkpoint['actor_anchor'] = frozen_anchor
+    with torch.no_grad():
+      trainer.actor.net.state_dict()[joint_bias].add_(.5)
+    checkpoint['actor'] = trainer.actor.state_dict()
+    torch.save(checkpoint, path)
+    trainer.load(str(path))
+    output_difference = trainer.actor(trainer.obs) - trainer.actor_anchor(trainer.obs)
+    torch.testing.assert_close(output_difference, torch.full_like(output_difference, .5))
+  else:
+    assert trainer.actor_anchor is None
 
 
 def test_imagined_joint_targets_obey_action_bounds_and_can_leave_saturation():

@@ -11,8 +11,10 @@ One loop, three phases per iteration (SuperMimic Alg. A.1):
 from __future__ import annotations
 
 import argparse
+import math
 import time
 from collections import defaultdict
+from copy import deepcopy
 from dataclasses import asdict, dataclass, fields
 from datetime import datetime
 from pathlib import Path
@@ -75,6 +77,8 @@ class TrainCfg:
   """The actor's learning rate relative to lr. Fine-tuning on terrain wants smaller
   actor steps: at the full rate the actor drifts into states the world model
   predicts badly (falls rise once the ramp-up completes)."""
+  actor_anchor_weight: float = 0.0
+  """Penalize changes to requested actions relative to the resumed velocity policy."""
   lr_final_frac: float = 0.03
   lr_decay_iterations: int = 30_000
   horizon: int = 32
@@ -141,9 +145,12 @@ class TrainCfg:
 
 
   def __post_init__(self):
+    if not math.isfinite(self.actor_anchor_weight) or self.actor_anchor_weight < 0:
+      raise ValueError("actor_anchor_weight must be finite and nonnegative")
+    if self.actor_anchor_weight and (self.task != "Lite3-Velocity-Flat" or not self.resume):
+      raise ValueError("actor_anchor_weight requires a Lite3 velocity --resume checkpoint")
     if self.task == "Lite3-Velocity-Flat":
       from lite3_supermimic.locomotion.gait import GaitCfg
-      import math
       GaitCfg(mode=self.gait, bound_enter=self.bound_enter, bound_exit=self.bound_exit)
       if not math.isfinite(self.max_forward) or self.max_forward <= 0:
         raise ValueError("max_forward must be finite and positive")
@@ -195,8 +202,6 @@ def clip_grads(params, global_norm: float, elem: float) -> torch.Tensor:
 
 
 def lr_at(cfg: TrainCfg, it: int) -> float:
-  import math
-
   t = min(1.0, it / cfg.lr_decay_iterations)
   frac = cfg.lr_final_frac + (1 - cfg.lr_final_frac) * 0.5 * (1 + math.cos(math.pi * t))
   return cfg.lr * frac
@@ -361,6 +366,7 @@ class Trainer:
     self.collapse_strikes = 0
     self.nonfinite_steps = 0
     self.start_it = 0
+    self.actor_anchor: Actor | None = None
     if cfg.resume:
       self.load(cfg.resume)
 
@@ -420,6 +426,11 @@ class Trainer:
         raise ValueError("checkpoint history does not match this task")
       expand_actor_new_terms(ckpt["actor"], self.actor, old_terms, self.terms, self.history)
       print(f"actor expanded from {old_obs_dim} to {new_obs_dim} inputs", flush=True)
+    if self.cfg.actor_anchor_weight:
+      self.actor_anchor = deepcopy(self.actor).requires_grad_(False).eval()
+      if ckpt.get("actor_anchor") is not None:
+        self.actor_anchor.load_state_dict(ckpt["actor_anchor"])
+      print("anchoring actor actions to the reference checkpoint; freezing actor observation statistics", flush=True)
     critic_sd = self.critic.state_dict()
     same_critic = all(
       k in ckpt["critic"] and ckpt["critic"][k].shape == v.shape for k, v in critic_sd.items()
@@ -490,8 +501,9 @@ class Trainer:
         self.wm.update_stats(
           s[keep], a[keep], self.a_prev[keep], self.xi[keep], relief[keep], s1[keep], dpose[keep]
         )
-      if not (self.locomotion and self.actor_frozen_until
-              and getattr(self, "it", self.start_it) <= self.actor_frozen_until):
+      actor_warming_up = (self.locomotion and self.actor_frozen_until
+                           and getattr(self, "it", self.start_it) <= self.actor_frozen_until)
+      if self.actor_anchor is None and not actor_warming_up:
         self.actor.norm.update(self.obs)
       # Fast turning (|yaw rate| > 3 rad/s): watches for circling / spinning.
       wz = env.scene["robot"].data.root_link_ang_vel_b[:, 2].abs()
@@ -602,6 +614,12 @@ class Trainer:
     hint = cfg.dodge_shaping * max(0.0, 1.0 - self.it / max(1, cfg.dodge_shaping_decay_iterations))
     objective, data = self.imag.rollout(self.wm, self.actor, self.critic, seed, hint)
     loss = -objective.mean()
+    anchor_stats = {}
+    if self.actor_anchor is not None:
+      obs = seed["obs"]
+      anchor_mse = (self.actor(obs) - self.actor_anchor(obs)).square().mean()
+      loss = loss + cfg.actor_anchor_weight * anchor_mse
+      anchor_stats["actor_anchor_rms"] = anchor_mse.detach().sqrt().item()
     self.opt_actor.zero_grad(set_to_none=True)
     loss.backward()
     gnorm = clip_grads(self.actor.parameters(), cfg.grad_clip, cfg.grad_clip_elem)
@@ -633,6 +651,7 @@ class Trainer:
           self.opt_critic.step()
         c_losses.append(c_loss.item())
     return {
+      **anchor_stats,
       "imagined_return": objective.mean().item(),
       "imagined_reward": data["rewards"].mean().item(),
       "imagined_survival": data["surv"][:, -1].mean().item(),
@@ -650,6 +669,7 @@ class Trainer:
         "iteration": it,
         "cfg": asdict(self.cfg),
         "actor": self.actor.state_dict(),
+        "actor_anchor": self.actor_anchor.state_dict() if self.actor_anchor is not None else None,
         "critic": self.critic.state_dict(),
         "world_model": self.wm.state_dict(),
         "opt_wm": self.opt_wm.state_dict(),

@@ -83,6 +83,8 @@ python scripts/eval_velocity.py --checkpoint <完整checkpoint> \
 
 新训练默认将 HipX 位置目标限制在默认角的 ±0.25 rad 内，并将所有关节目标限制在各自的软限位范围内。评估按检查点恢复动作范围。旧权重可以用 `--hipx-target-limit 0.25` 单独试跑限幅效果。续训时若动作范围变化，会重新拟合 critic，并在此期间冻结 actor 的参数和观测归一化统计量。评估同时报告实际前向平均速度 `vx_mean_m_s` 和平滑后的平均指令 `command_vx_mean_m_s`。
 
+低速续训可用 `--actor-anchor-weight 2.0` 冻结起始检查点的策略作为参考。续训在真实回放观测上计算当前动作与参考动作的均方差，并记录 `actor_anchor_rms`。启用时固定 actor 的观测归一化统计量。从这类运行再次续训并继续启用该选项时，检查点会恢复原参考策略。是否采用新权重由相同速度指令和种子的仿真评估决定。
+
 当前未提供此任务训练完成的权重。macOS CPU 检查不能验证 CUDA 并行训练、收敛效果或真机安全运行。固定步态与自动步态的训练设置保存在检查点中，续训使用相同设置。评估可以通过 `--gait` 覆盖，但跨设置表现取决于训练覆盖。
 
 追踪任务和旧 PPO 基线的历史说明见 [迁移记录](docs/SUPERMIMIC_MIGRATION.md) 与 [DreamWaQ／AMP](docs/LEGACY_DREAMWAQ.md)。
