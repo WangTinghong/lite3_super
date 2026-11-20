@@ -16,3 +16,12 @@ for task_id, kw in (
     play_env_cfg=lite3_chase_env_cfg(play=True, **kw),
     rl_cfg=RslRlOnPolicyRunnerCfg(),  # unused: training is SuperMimic (scripts/train.py)
   )
+
+from lite3_supermimic.locomotion.env_cfg import flat_velocity_env_cfg
+
+register_mjlab_task(
+  task_id="Lite3-Velocity-Flat",
+  env_cfg=flat_velocity_env_cfg(),
+  play_env_cfg=flat_velocity_env_cfg(play=True),
+  rl_cfg=RslRlOnPolicyRunnerCfg(),
+)

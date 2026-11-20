@@ -1,20 +1,79 @@
 # Lite3 SuperMimic
 
-Lite3 四足机器人的世界模型强化学习项目，新默认训练链路使用多步动力学学习和想象轨迹反向传播，旧 PPO／DreamWaQ／AMP 代码保留作基线。
+当前默认任务为 **Lite3-Velocity-Flat**，使用 SuperMimic 世界模型学习平地速度跟踪、零指令站立及 walk／trot／bound 步态切换。
 
-完整的[两项目分析、机器人适配、安装训练及验证说明](docs/SUPERMIMIC_MIGRATION.md)。
+策略输入为五帧 IMU、关节状态、上次动作、速度指令和足端相位，共 270 维。按 yaw 坐标系跟踪前后／侧向速度和偏航角速度，输出 12 个关节位置动作。真实环境和想象训练共享同一套步态时钟及奖励函数。
 
-在 NVIDIA CUDA Linux 机器、独立 Python 3.10+ 环境中安装好 PyTorch 后：
+## 安装和检查
+
+在 NVIDIA CUDA Linux 机器上使用独立 Python 3.10+ 环境，先安装匹配驱动的 PyTorch。
 
 ```bash
 python -m pip install -e '.[dev]'
 python -m pytest tests/supermimic -q
-python scripts/check_supermimic.py --task Lite3-Chase-Flat --num-envs 8
-bash train_local.sh --run-name lite3_flat
+python scripts/check_supermimic.py --task Lite3-Velocity-Flat --num-envs 8
 ```
 
-任务：`Lite3-Chase-Flat`、`Lite3-Chase-Obstacles`、`Lite3-Chase-Terrain`。地形任务包含楼梯，沿用附件的追踪／躲避目标；与原 `lite3_stairs` 速度指令任务不同。完整 GPU 训练和 Lite3 收敛尚未验证，没有预训练 Lite3 权重。
+## 训练
 
-CPU 检查覆盖模型、动作映射、PD 站立、世界模型及完整想象策略梯度。新策略不能加载 Go2 或旧 PPO 权重，也不能直接用于旧真机部署接口。
+```bash
+# 默认速度课程，从低速走到高速前进
+bash train_local.sh --run-name lite3_velocity_gaits
 
-旧流程见 [DreamWaQ／AMP 说明](docs/LEGACY_DREAMWAQ.md)，在原环境中运行 `bash train_ppo_legacy.sh`。
+# 先单独训练低速基础能力，默认自动切换 walk/trot
+bash train_local.sh --max-forward 0.8 --run-name lite3_low_speed
+
+# 同一个策略继续扩大速度范围，训练高速 bound
+bash train_local.sh --resume logs/lite3_supermimic/<低速运行目录>/model_40000.pt \
+  --continue-run true --iterations 80000 --max-forward 2.0 \
+  --run-name lite3_velocity_bound
+```
+
+`--continue-run true` 的 `--iterations` 为新的总迭代数。续训重建 replay，参数初始化后需要重新采样，不保证逐样本确定性恢复。
+
+默认指令每 4–8 秒重采样，20% 为站立目标。速度经过加速度限制，避免突然起停。初始最大前进速度为 0.5 m/s，在 20,000 个环境步内线性扩大到 `--max-forward`，同时开放后退、侧移和转向。高于 1.2 m/s 的前进样本使用直行指令。
+
+自动步态按平滑后的**指令速度**选择。walk 在低速进入、到 0.4 m/s 退出；trot 覆盖中速；前进超过 1.5 m/s 进入 bound，降至 1.2 m/s 退出。较大的侧移或转向会选择 trot。阈值具有滞回，步态混合时间常数为 0.5 秒，周期相位连续。
+
+```bash
+# 可调 bound 阈值
+bash train_local.sh --bound-enter 1.6 --bound-exit 1.3 --run-name custom_thresholds
+
+# 固定步态训练，可选 walk、trot、bound、auto
+bash train_local.sh --gait trot --max-forward 1.0 --run-name trot
+
+tensorboard --logdir logs/lite3_supermimic
+```
+
+训练日志包含速度误差、偏航误差、bound 占比、跌倒和想象回报。步态由足端相位与离地高度奖励引导，站立时四足保持支撑。bound 的前足同步、后足同步，前后组相差半周期。奖励中的相位一致性约束需要通过物理评估确认，配置和梯度检查通过后仍需训练才能获得实际运动能力。
+
+先执行小规模三阶段训练检查。
+
+```bash
+python scripts/train_supermimic.py --task Lite3-Velocity-Flat \
+  --num-envs 16 --buffer-len 64 --wm-window 4 --wm-batch 32 \
+  --wm-hidden 64 64 --wm-updates 1 --archive-size 128 \
+  --imag-batch 16 --horizon 4 --actor-hidden 64 64 --critic-hidden 64 64 \
+  --critic-epochs 1 --critic-minibatches 1 --warmup-iterations 2 \
+  --iterations 5 --save-interval 5 --log-interval 1 --compile false --run-name smoke
+```
+
+## 评估
+
+```bash
+# 自动循环 站立 -> walk -> trot -> 高速 bound -> 降速 -> 站立
+python scripts/eval_velocity.py --checkpoint <完整checkpoint> --seconds 60
+
+# 固定前进速度，自动选步态
+python scripts/eval_velocity.py --checkpoint <完整checkpoint> --vx 1.8 --seconds 30
+
+# 录像
+python scripts/eval_velocity.py --checkpoint <完整checkpoint> \
+  --num-envs 1 --seconds 30 --video lite3_gait_switch.mp4
+```
+
+默认循环每段 5 秒，速度依次为 0、0.2、0.8、1.8、0.8、0 m/s。报告按站立／walk／trot／bound 分组的线速度 RMSE、偏航 RMSE、足端相位一致性和跌倒次数。低速权重应先在训练速度范围内评估，例如 `--vx 0.5`。足端相位一致性采用距地高度阈值估算接触。实际接触冲量和运动稳定性仍需要结合录像判断。
+
+当前未提供此任务训练完成的权重。macOS CPU 检查不能验证 CUDA 并行训练、收敛效果或真机安全运行。固定步态与自动步态的训练设置保存在检查点中，续训使用相同设置。评估可以通过 `--gait` 覆盖，但跨设置表现取决于训练覆盖。
+
+追踪任务和旧 PPO 基线的历史说明见 [迁移记录](docs/SUPERMIMIC_MIGRATION.md) 与 [DreamWaQ／AMP](docs/LEGACY_DREAMWAQ.md)。

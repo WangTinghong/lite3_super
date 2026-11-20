@@ -1,5 +1,7 @@
 # Lite3 SuperMimic 迁移分析与使用说明
 
+此文档记录追踪／躲避版本的迁移。当前默认平地速度跟踪与步态切换任务见根目录 readme.md。
+
 ## 迁移结果与边界
 
 本项目的新默认入口 `train_local.sh` 使用 `lite3_supermimic`，算法链路为“仿真采样 → 多步世界模型拟合 → 想象轨迹反向传播更新 actor → TD(λ) critic 拟合”。它不调用旧的 PPO、DreamWaQ VAE 或 AMP 判别器。

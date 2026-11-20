@@ -1,4 +1,4 @@
-"""SuperMimic training for Lite3 chase / dodge (oracle perception).
+"""SuperMimic training for Lite3 velocity/gait and chase tasks.
 
 One loop, three phases per iteration (SuperMimic Alg. A.1):
   1. Collect: the deterministic actor plus Gaussian action noise steps the mjlab
@@ -30,7 +30,13 @@ from lite3_supermimic.target import terrain as tr
 
 @dataclass(kw_only=True)
 class TrainCfg:
-  task: str = "Lite3-Chase-Flat"
+  task: str = "Lite3-Velocity-Flat"
+  gait: str = "auto"
+  """Velocity task gait: auto, walk, trot or bound."""
+  max_forward: float = 2.0
+  velocity_curriculum_iterations: int = 20_000
+  bound_enter: float = 1.5
+  bound_exit: float = 1.2
   num_envs: int = 2048
   buffer_len: int = 400
   iterations: int = 40_000
@@ -133,6 +139,14 @@ class TrainCfg:
 
 
   def __post_init__(self):
+    if self.task == "Lite3-Velocity-Flat":
+      from lite3_supermimic.locomotion.gait import GaitCfg
+      import math
+      GaitCfg(mode=self.gait, bound_enter=self.bound_enter, bound_exit=self.bound_exit)
+      if not math.isfinite(self.max_forward) or self.max_forward <= 0:
+        raise ValueError("max_forward must be finite and positive")
+      if self.velocity_curriculum_iterations <= 0:
+        raise ValueError("velocity_curriculum_iterations must be positive")
     positive = ("num_envs", "buffer_len", "iterations", "collect_steps", "wm_window",
                 "wm_batch", "wm_updates", "imag_batch", "horizon", "critic_epochs",
                 "critic_minibatches", "archive_size", "save_interval", "log_interval")
@@ -254,13 +268,24 @@ class Trainer:
     env_cfg = load_env_cfg(cfg.task)
     env_cfg.scene.num_envs = cfg.num_envs
     env_cfg.seed = cfg.seed
-    env_cfg.commands["target"].target.curriculum_steps = cfg.target_curriculum_iterations
+    self.locomotion = "velocity" in env_cfg.commands
+    if self.locomotion:
+      from lite3_supermimic.locomotion.gait import GaitCfg
+      command_cfg = env_cfg.commands["velocity"]
+      command_cfg.gait = GaitCfg(mode=cfg.gait, bound_enter=cfg.bound_enter, bound_exit=cfg.bound_exit)
+      command_cfg.max_forward = cfg.max_forward
+      command_cfg.initial_forward = min(command_cfg.initial_forward, cfg.max_forward)
+      command_cfg.curriculum_steps = cfg.velocity_curriculum_iterations
+      if cfg.expert_policy:
+        raise ValueError("Velocity training currently collects with its own actor; omit --expert-policy")
+    else:
+      env_cfg.commands["target"].target.curriculum_steps = cfg.target_curriculum_iterations
     if "terrain_levels" in env_cfg.curriculum:
       env_cfg.curriculum["terrain_levels"].params["steps"] = cfg.terrain_curriculum_iterations
     self.env_cfg = env_cfg
     self.env = ManagerBasedRlEnv(cfg=env_cfg, device="cuda:0")
     self.dev = self.env.device
-    self.term = self.env.command_manager.get_term("target")
+    self.term = self.env.command_manager.get_term("velocity" if self.locomotion else "target")
     self.history = env_cfg.observations["actor"].history_length
 
     obs, _ = self.env.reset()
@@ -279,19 +304,30 @@ class Trainer:
     self.opt_wm = torch.optim.Adam(self.wm.parameters(), lr=cfg.lr)
     self.opt_actor = torch.optim.Adam(self.actor.parameters(), lr=cfg.lr, betas=(0.9, 0.95))
 
-    self.buf = ReplayBuffer(cfg.num_envs, cfg.buffer_len, obs_dim, self.dev)
+    from lite3_supermimic.locomotion.gait import STATE_DIM as command_dim
+    from lite3_supermimic.supermimic.buffer import GEN_DIM
+    self.buf = ReplayBuffer(cfg.num_envs, cfg.buffer_len, obs_dim, self.dev,
+                            gen_dim=command_dim if self.locomotion else GEN_DIM)
     self.archive = WindowArchive(cfg.archive_size, cfg.wm_window, st.CONTEXT_DIM, self.dev)
     self.explore = torch.arange(cfg.num_envs, device=self.dev) < int(cfg.explore_frac * cfg.num_envs)
     self.ou = torch.zeros(cfg.num_envs, st.NUM_JOINTS, device=self.dev)
-    # Imagination uses the env's reward weights, so the two cannot drift apart.
-    weights = RewardWeights(**{f.name: env_cfg.rewards[f.name].weight
-                               for f in fields(RewardWeights) if f.name in env_cfg.rewards})
-    imag_cfg = ImagineCfg(horizon=cfg.horizon, dt=self.env.step_dt, compile=cfg.compile, sensor_grad=cfg.sensor_grad,
-                          weights=weights)
-    self.field = self.term.height_field  # None on flat ground
     self.terms = st.obs_terms(env_cfg)
-    self.imag = Imagination(imag_cfg, self.consts, self.term.cfg.target, self.history, self.dev,
-                            self.terms, self.field)
+    if self.locomotion:
+      from lite3_supermimic.locomotion.imagine import LocomotionImagination
+      command_cfg = env_cfg.commands["velocity"]
+      imag_cfg = ImagineCfg(horizon=cfg.horizon, dt=self.env.step_dt, compile=cfg.compile,
+                            fall_angle_deg=60.0, weights=command_cfg.reward_weights)
+      self.field = None
+      self.imag = LocomotionImagination(imag_cfg, self.consts, command_cfg.gait,
+                                         self.history, self.dev)
+    else:
+      weights = RewardWeights(**{f.name: env_cfg.rewards[f.name].weight
+                                 for f in fields(RewardWeights) if f.name in env_cfg.rewards})
+      imag_cfg = ImagineCfg(horizon=cfg.horizon, dt=self.env.step_dt, compile=cfg.compile,
+                            sensor_grad=cfg.sensor_grad, weights=weights)
+      self.field = self.term.height_field
+      self.imag = Imagination(imag_cfg, self.consts, self.term.cfg.target, self.history,
+                              self.dev, self.terms, self.field)
     self.critic = Critic(self.imag.critic_dim, cfg.critic_hidden).to(self.dev)
     self.opt_critic = torch.optim.Adam(self.critic.parameters(), lr=cfg.lr)
     self.driver = self.expert = None
@@ -323,6 +359,12 @@ class Trainer:
     ckpt = torch.load(path, map_location=self.dev, weights_only=False)
     from lite3_supermimic.checkpoint import validate_checkpoint
     validate_checkpoint(ckpt)
+    old_velocity = ckpt.get("cfg", {}).get("task") == "Lite3-Velocity-Flat"
+    if self.locomotion != old_velocity:
+      raise ValueError("Velocity/gait and chase checkpoints have different task semantics")
+    if self.locomotion:
+      if ckpt.get("gait_cfg") != asdict(self.term.cfg.gait):
+        raise ValueError("Resume with the checkpoint's gait settings")
     wm_sd = self.wm.state_dict()
     same_wm = all(
       k in ckpt["world_model"] and ckpt["world_model"][k].shape == v.shape for k, v in wm_sd.items()
@@ -391,7 +433,7 @@ class Trainer:
     for _ in range(cfg.collect_steps):
       s = st.robot_state(env, field=self.field)
       pose = st.planar_pose(env)
-      gen = pack_generator(self.term.gen)
+      gen = self.term.state.clone() if self.locomotion else pack_generator(self.term.gen)
       relief = self._relief(pose)
       a = self.actor(self.obs)
       dt = env.step_dt
@@ -435,7 +477,7 @@ class Trainer:
       self.obs = obs["actor"]
       self.env_steps += env.num_envs
       for k, v in extras.get("log", {}).items():
-        if k.startswith(("Episode_Reward", "Metrics/target", "Episode_Termination")):  # env logs
+        if k.startswith(("Episode_Reward", "Metrics/target", "Metrics/velocity", "Episode_Termination")):  # env logs
           self.ep_stats[k].append(float(v))
 
   def driver_scale(self) -> float:
@@ -447,6 +489,8 @@ class Trainer:
   # Phase 2.
 
   def _relief(self, pose: torch.Tensor) -> torch.Tensor:
+    if self.locomotion:
+      return pose.new_zeros(pose.shape[0], tr.SCAN_POINTS)
     return tr.relief(pose[:, :2], pose[:, 2], self.field, self.term.obstacle_layout)
 
   def _gather(self, env, idx, valid) -> dict[str, torch.Tensor]:
@@ -591,6 +635,8 @@ class Trainer:
         "obs_dim": self.obs.shape[-1],
         "obs_terms": self.terms,
         "history": self.history,
+        "gait_cfg": asdict(self.term.cfg.gait) if self.locomotion else None,
+        "command_cfg": asdict(self.term.cfg) if self.locomotion else None,
       },
       path,
     )
@@ -625,18 +671,23 @@ class Trainer:
         line.append(f"archive {self.archive.size}")
         if self.nonfinite_steps:
           line.append(f"nonfinite_skipped {self.nonfinite_steps}")
-        rates = self.term.kind_hit_rate.tolist()
-        for name, r in zip(("ball", "low_bar", "high_bar"), rates):
-          self.writer.add_scalar(f"Metrics/hit_rate/{name}", r, it)
-        line.append("hit_rate " + "/".join(f"{r:.2f}" for r in rates))
+        if not self.locomotion:
+          rates = self.term.kind_hit_rate.tolist()
+          for name, r in zip(("ball", "low_bar", "high_bar"), rates):
+            self.writer.add_scalar(f"Metrics/hit_rate/{name}", r, it)
+          line.append("hit_rate " + "/".join(f"{r:.2f}" for r in rates))
         falls = self.ep_stats.get("Episode_Termination/fell_over", [])
-        falls_mean = sum(falls) / len(falls) if falls else 0.0
+        low = self.ep_stats.get("Episode_Termination/low_body", [])
+        falls = [sum(falls) / len(falls) if falls else 0.0,
+                 sum(low) / len(low) if low else 0.0]
+        falls_mean = sum(falls)
         for k, vals in self.ep_stats.items():
           mean = sum(vals) / len(vals)
           self.writer.add_scalar(k, mean, it)
           if k in ("Metrics/target/tags", "Metrics/target/hits", "Metrics/target/dist",
                    "Metrics/target/obstacle_contact", "Episode_Termination/fell_over",
-                   "Metrics/fast_yaw"):
+                   "Metrics/velocity/velocity_error", "Metrics/velocity/yaw_error",
+                   "Metrics/velocity/bound_fraction", "Metrics/fast_yaw"):
             line.append(f"{k.split('/')[-1]} {mean:.3g}")
         self.ep_stats.clear()
         self.writer.add_scalar("time/minutes", elapsed / 60, it)

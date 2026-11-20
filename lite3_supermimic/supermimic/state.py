@@ -90,6 +90,11 @@ OBS_NOISE = {
 def obs_terms(env_cfg) -> tuple[tuple[str, int], ...]:
   """Actor terms (name, per-frame dim) of an env config, in order."""
   names = list(env_cfg.observations["actor"].terms)
+  if "velocity" in env_cfg.commands:
+    from lite3_supermimic.locomotion.imagine import OBS_TERMS as velocity_terms
+    if names != [name for name, _ in velocity_terms]:
+      raise ValueError(f"Unexpected velocity observation layout: {names}")
+    return velocity_terms
   rays = env_cfg.commands["target"].target.obstacles.lidar_rays
   known = dict(OBS_TERMS) | {"lidar": rays, "height_scan": SCAN_POINTS}
   terms = tuple((n, known[n]) for n in names)

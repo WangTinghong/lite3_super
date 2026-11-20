@@ -233,16 +233,18 @@ class Imagination:
     hist = st.push_history(hist, frame, self.h, self.terms)
     return s_next, pose_next, a, hist, gst, r, d, crit_in
 
+  def _generator_state(self, seed):
+    from lite3_supermimic.supermimic.buffer import unpack_generator
+    gen = BallTarget(self.target_cfg, seed["s"].shape[0], self.device)
+    unpack_generator(gen, seed["gen"])
+    return gen.state()
+
   def rollout(self, wm, actor, critic, seed: dict, hint_weight: float = 0.0):
     """Imagine H steps from replay seeds. Returns differentiable objective and critic data."""
-    from lite3_supermimic.supermimic.buffer import unpack_generator
-
     cfg = self.cfg
     B = seed["s"].shape[0]
     env_ids = seed["env"]
-    gen = BallTarget(self.target_cfg, B, self.device)
-    unpack_generator(gen, seed["gen"])
-    gst = gen.state()
+    gst = self._generator_state(seed)
     s, pose, a_prev, hist = seed["s"], seed["pose"], seed["a_prev"], seed["obs"]
     xi, enc_bias = seed["xi"], seed["enc_bias"]
     dt = torch.full((B,), cfg.dt, device=self.device)
