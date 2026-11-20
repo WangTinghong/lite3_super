@@ -362,9 +362,14 @@ class Trainer:
     old_velocity = ckpt.get("cfg", {}).get("task") == "Lite3-Velocity-Flat"
     if self.locomotion != old_velocity:
       raise ValueError("Velocity/gait and chase checkpoints have different task semantics")
+    rewards_changed = False
     if self.locomotion:
       if ckpt.get("gait_cfg") != asdict(self.term.cfg.gait):
         raise ValueError("Resume with the checkpoint's gait settings")
+      old_weights = (ckpt.get("command_cfg") or {}).get("reward_weights")
+      rewards_changed = old_weights != asdict(self.term.cfg.reward_weights)
+    if self.cfg.continue_run:
+      self.start_it = int(ckpt.get("iteration", 0))
     wm_sd = self.wm.state_dict()
     same_wm = all(
       k in ckpt["world_model"] and ckpt["world_model"][k].shape == v.shape for k, v in wm_sd.items()
@@ -408,20 +413,21 @@ class Trainer:
     same_critic = all(
       k in ckpt["critic"] and ckpt["critic"][k].shape == v.shape for k, v in critic_sd.items()
     )
-    if same_critic and not self.cfg.reset_critic:
+    if same_critic and not (self.cfg.reset_critic or rewards_changed):
       self.critic.load_state_dict(ckpt["critic"])
       if "opt_critic" in ckpt:
         self.opt_critic.load_state_dict(ckpt["opt_critic"])
     else:
       self.actor_frozen_until = max(
-        self.actor_frozen_until, self.policy_start + self.cfg.critic_warmup_iterations
+        self.actor_frozen_until, max(self.start_it, self.policy_start) + self.cfg.critic_warmup_iterations
       )
+      if rewards_changed:
+        print("locomotion reward weights changed; refitting the critic", flush=True)
       print(f"critic re-initialised; actor frozen until iteration {self.actor_frozen_until}",
             flush=True)
     print(f"resumed from {path} (iteration {ckpt.get('iteration')})", flush=True)
     if self.cfg.continue_run:
       # One env step per iteration: the env-side curricula count env steps.
-      self.start_it = int(ckpt.get("iteration", 0))
       self.env.common_step_counter = self.start_it
       print(f"continuing at iteration {self.start_it}", flush=True)
 

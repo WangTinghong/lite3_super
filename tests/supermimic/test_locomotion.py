@@ -117,6 +117,66 @@ def test_env_and_imagined_rewards_share_command_timing():
   torch.testing.assert_close(result[4], advance(command, .02, cfg))
 
 
+def test_hipx_reward_penalizes_both_sides_and_relaxes_during_maneuvers():
+  from lite3_supermimic.robot.constants import HIP_X_JOINT_INDICES
+
+  n = 5
+  positions = torch.zeros(n, st.STATE_DIM)
+  positions[:, st.Q.start + 1] = .8  # HipY flexion is outside this penalty.
+  hipx = torch.tensor([-.3, .3, -.3, .3])
+  positions[:, st.Q.start + torch.tensor(HIP_X_JOINT_INDICES)] = hipx
+  positions[0, st.Q] *= .25
+  positions.requires_grad_(True)
+  command = initial_state(n, 'cpu')
+  command[:, 3] = .5
+  command[2, 4] = .3
+  command[3, 5] = .7
+  command[4, 7:10] = torch.tensor([0., 0., 1.])
+  zero_action = torch.zeros(n, 12)
+  penalty = reward_terms(positions, zero_action, zero_action, command, consts(n), GaitCfg())['hipx_deviation']
+  torch.testing.assert_close(penalty[0], torch.tensor(0.))
+  torch.testing.assert_close(penalty[1], torch.tensor(.16))
+  assert (penalty[2:4] < .02 * penalty[1]).all()
+  torch.testing.assert_close(penalty[4], torch.tensor(0.))
+  penalty.sum().backward()
+  grad = positions.grad[1, st.Q]
+  assert (grad[list(HIP_X_JOINT_INDICES)] * hipx > 0).all()
+  assert grad[1] == 0
+
+
+def test_resuming_legacy_rewards_refits_critic_on_continued_timeline(tmp_path):
+  from dataclasses import asdict
+  from lite3_supermimic.robot.constants import JOINT_NAMES
+  from lite3_supermimic.supermimic.train import Actor, Critic, Trainer, TrainCfg
+  from lite3_supermimic.supermimic.world_model import WorldModel
+
+  trainer = Trainer.__new__(Trainer)
+  trainer.cfg = TrainCfg(continue_run=True)
+  trainer.dev, trainer.locomotion = 'cpu', True
+  trainer.policy_start, trainer.actor_frozen_until = 300, 0
+  trainer.obs = torch.zeros(1, 270)
+  gait, weights = GaitCfg(), RewardWeights()
+  trainer.term = SimpleNamespace(cfg=SimpleNamespace(gait=gait, reward_weights=weights))
+  trainer.env = SimpleNamespace(common_step_counter=0)
+  trainer.wm = WorldModel((16, 16))
+  trainer.actor = Actor(270, (16, 16), 12)
+  trainer.critic = Critic(86, (16, 16))
+  initial_critic = {key: value.clone() for key, value in trainer.critic.state_dict().items()}
+  old_weights = asdict(weights)
+  old_weights.pop('hipx_deviation')
+  old_critic = {key: torch.zeros_like(value) for key, value in initial_critic.items()}
+  path = tmp_path / 'model_7000.pt'
+  torch.save(dict(robot='lite3', joint_names=JOINT_NAMES, iteration=7000,
+                  cfg={'task': trainer.cfg.task}, gait_cfg=asdict(gait),
+                  command_cfg={'reward_weights': old_weights}, critic=old_critic,
+                  actor=trainer.actor.state_dict(), world_model=trainer.wm.state_dict()), path)
+  trainer.load(str(path))
+  assert trainer.env.common_step_counter == trainer.start_it == 7000
+  assert trainer.actor_frozen_until == 7500
+  for key, value in trainer.critic.state_dict().items():
+    torch.testing.assert_close(value, initial_critic[key])
+
+
 def test_locomotion_imagination_updates_actor_with_finite_gradients():
   from lite3_supermimic.supermimic.train import Actor, Critic
   from lite3_supermimic.supermimic.imagine import ImagineCfg

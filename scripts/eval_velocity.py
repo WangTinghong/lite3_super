@@ -11,6 +11,7 @@ import torch
 
 from lite3_supermimic.checkpoint import validate_checkpoint
 from lite3_supermimic.locomotion.gait import GaitCfg, GAITS, foot_schedule
+from lite3_supermimic.robot.constants import HIP_X_JOINT_INDICES, LEGS
 from lite3_supermimic.supermimic import state as st
 
 
@@ -32,7 +33,10 @@ class VelocityEvaluation:
     self.step_index = 0
     self.metrics = {
       name: {"samples": 0, "velocity_squared_error": 0., "yaw_squared_error": 0.,
-             "falls": 0, "foot_phase_agreement": 0.} for name in ("stand", *GAITS)
+             "falls": 0, "foot_phase_agreement": 0.,
+             "hipx_sum": self.term.state.new_zeros(len(LEGS)),
+             "hipx_squared_sum": self.term.state.new_zeros(len(LEGS))}
+      for name in ("stand", *GAITS)
     }
 
   def reset(self):
@@ -52,6 +56,7 @@ class VelocityEvaluation:
     # Auto-reset states must be excluded from kinematic errors.
     keep = ~(terminated | truncated)
     s = st.robot_state(env)
+    hipx = s[:, st.Q][:, HIP_X_JOINT_INDICES]
     gait_cfg = self.term.cfg.gait
     _, _, stance, _ = foot_schedule(command, gait_cfg)
     actual_contact = st.feet_world_z(s) - st.FOOT_RADIUS < 0.02
@@ -66,6 +71,9 @@ class VelocityEvaluation:
       values["velocity_squared_error"] += float((s[valid, 4:6] - command[valid, 3:5]).square().sum())
       values["yaw_squared_error"] += float((s[valid, 9] - command[valid, 5]).square().sum())
       values["foot_phase_agreement"] += float(agree[valid].sum())
+      valid_hipx = hipx[valid]
+      values["hipx_sum"] += valid_hipx.sum(dim=0)
+      values["hipx_squared_sum"] += valid_hipx.square().sum(dim=0)
     if self.writer and self.step_index % self.video_stride == 0:
       self.writer.add_image(env.render())
     self.step_index += 1
@@ -83,6 +91,8 @@ class VelocityEvaluation:
           "velocity_rmse_m_s": math.sqrt(values["velocity_squared_error"] / n),
           "yaw_rmse_rad_s": math.sqrt(values["yaw_squared_error"] / n),
           "foot_phase_agreement": values["foot_phase_agreement"] / n,
+          "hipx_mean_deg": dict(zip(LEGS, torch.rad2deg(values["hipx_sum"] / n).tolist())),
+          "hipx_rms_deg": dict(zip(LEGS, torch.rad2deg((values["hipx_squared_sum"] / n).sqrt()).tolist())),
           "falls": values["falls"], "valid_seconds": n * self.unwrapped.step_dt,
         }
     return result
@@ -93,6 +103,7 @@ def main():
   ap.add_argument("--checkpoint", required=True)
   ap.add_argument("--num-envs", type=int, help="Defaults to 1 with --viewer, otherwise 64.")
   ap.add_argument("--seconds", type=float, default=60)
+  ap.add_argument("--seed", type=int, help="Reuse the same seed to compare checkpoints.")
   ap.add_argument("--vx", type=float, default=None, help="Fixed command. Omit for an acceleration/deceleration cycle.")
   ap.add_argument("--vy", type=float, default=0)
   ap.add_argument("--yaw-rate", type=float, default=0)
@@ -121,6 +132,7 @@ def main():
     raise ValueError("Expected a Lite3-Velocity-Flat checkpoint")
   cfg = load_env_cfg("Lite3-Velocity-Flat", play=True)
   cfg.scene.num_envs = args.num_envs
+  cfg.seed = args.seed
   cmd_cfg = cfg.commands["velocity"]
   cmd_cfg.gait = GaitCfg(**ckpt["gait_cfg"])
   if args.gait:

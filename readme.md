@@ -79,6 +79,8 @@ python scripts/eval_velocity.py --checkpoint <完整checkpoint> \
 
 默认循环每段 5 秒，速度依次为 0、0.2、0.8、1.8、0.8、0 m/s。报告按站立／walk／trot／bound 分组的线速度 RMSE、偏航 RMSE、足端相位一致性和跌倒次数。低速权重应先在训练速度范围内评估，例如 `--vx 0.5`。足端相位一致性采用距地高度阈值估算接触。实际接触冲量和运动稳定性仍需要结合录像判断。
 
+直行奖励对各腿 HipX 偏离默认角超过 0.1 rad 的部分增加惩罚。侧移、转向或过渡到 bound 时会降低此惩罚。用相同的 `--seed`、环境数和速度指令对比检查点。评估输出中的 `hipx_mean_deg` 是按腿统计的有符号平均偏角，`hipx_rms_deg` 衡量偏角整体幅度。续训旧权重时，如果保存的奖励权重和当前版本不同，会先用新奖励重新拟合 critic，再更新 actor。
+
 当前未提供此任务训练完成的权重。macOS CPU 检查不能验证 CUDA 并行训练、收敛效果或真机安全运行。固定步态与自动步态的训练设置保存在检查点中，续训使用相同设置。评估可以通过 `--gait` 覆盖，但跨设置表现取决于训练覆盖。
 
 追踪任务和旧 PPO 基线的历史说明见 [迁移记录](docs/SUPERMIMIC_MIGRATION.md) 与 [DreamWaQ／AMP](docs/LEGACY_DREAMWAQ.md)。

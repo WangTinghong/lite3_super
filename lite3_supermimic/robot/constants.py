@@ -2,6 +2,7 @@
 LEGS = ("FL", "FR", "HL", "HR")
 JOINT_NAMES = tuple(f"{leg}_{joint}_joint" for leg in LEGS
                     for joint in ("HipX", "HipY", "Knee"))
+HIP_X_JOINT_INDICES = tuple(i for i, name in enumerate(JOINT_NAMES) if name.endswith("_HipX_joint"))
 DEFAULT_JOINT_POS = {".*_HipX_joint": 0.0, ".*_HipY_joint": -1.0, ".*_Knee_joint": 1.8}
 STIFFNESS = 20.0
 DAMPING = 0.7
