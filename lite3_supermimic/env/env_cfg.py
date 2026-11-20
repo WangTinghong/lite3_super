@@ -31,20 +31,6 @@ ACTOR_HISTORY = 5
 FOOT_SITE_NAMES = ("FR", "FL", "HR", "HL")
 
 
-def _quiet_solver_warnings(env, env_ids) -> None:
-  """Startup event: silence per-step solver iteration-limit warnings (with
-  thousands of worlds one hits the limit nearly every step)."""
-  del env_ids
-  from mujoco_warp import OverflowType
-
-  opt = env.sim.wp_model.opt
-  opt.warn_overflow = int(opt.warn_overflow) & ~int(
-    OverflowType.ITERATIONS | OverflowType.LS_ITERATIONS
-  )
-  # The flag is baked into the solver kernels when the CUDA graphs are captured.
-  env.sim.create_graph()
-
-
 def _obstacle_entity(half: tuple[float, float]) -> EntityCfg:
   """A tall static box, moved per env through its mocap body."""
 
@@ -112,9 +98,6 @@ def _configure_lite3(cfg: ManagerBasedRlEnvCfg) -> None:
       },
     )
   cfg.events["base_com"].params["asset_cfg"].body_names = ("base",)
-  cfg.events["quiet_solver_warnings"] = EventTermCfg(
-    mode="startup", func=_quiet_solver_warnings, params={}
-  )
   # A deterministic world model cannot represent velocity kicks (SuperMimic A).
   cfg.events.pop("push_robot", None)
 
