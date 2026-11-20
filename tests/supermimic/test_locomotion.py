@@ -253,8 +253,11 @@ def test_locomotion_imagination_updates_actor_with_finite_gradients():
   assert torch.isfinite(imag.gae_targets(critic, data)).all()
 
 
-def test_training_loop_logs_and_saves_without_chase_generator(tmp_path):
+@pytest.mark.parametrize('validate', [False, True])
+def test_training_loop_saves_only_validated_candidates_when_enabled(tmp_path, validate, capsys):
   from collections import defaultdict
+  from unittest.mock import Mock
+  from lite3_supermimic.locomotion.validation import StraightMetrics
   from lite3_supermimic.supermimic.train import Trainer, TrainCfg
   trainer = Trainer.__new__(Trainer)
   trainer.cfg = TrainCfg(iterations=2, warmup_iterations=0, log_interval=1, save_interval=1)
@@ -278,8 +281,19 @@ def test_training_loop_logs_and_saves_without_chase_generator(tmp_path):
     saved.append(it)
     return tmp_path / f'model_{it}.pt'
   trainer.save = save
-  trainer.run()
-  assert saved == [1, 2]
+  if validate:
+    trainer.actor = object()
+    reference = StraightMetrics(.048, .053, .85, 0, 1000)
+    accepted = StraightMetrics(.05, .06, .84, 0, 1000)
+    regressed = StraightMetrics(.22, .505, .71, 3, 1000)
+    validator = Mock()
+    validator.evaluate.side_effect = [reference, accepted, regressed]
+    trainer._run(validator)
+    assert saved == [1]
+    assert 'FAIL' in capsys.readouterr().out
+  else:
+    trainer.run()
+    assert saved == [1, 2]
 
 
 @pytest.mark.parametrize('kwargs', [{'gait': 'unknown'}, {'max_forward': -1},

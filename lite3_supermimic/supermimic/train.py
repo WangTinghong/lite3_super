@@ -139,6 +139,8 @@ class TrainCfg:
   the last checkpoint and halve the learning rate."""
   log_interval: int = 50
   save_interval: int = 1000
+  validate_straight: bool = False
+  """Stop fine-tuning if a saved candidate regresses in a fixed MuJoCo straight walk."""
   seed: int = 0
   run_name: str = "supermimic"
   log_root: str = "logs/lite3_supermimic"
@@ -149,6 +151,8 @@ class TrainCfg:
       raise ValueError("actor_anchor_weight must be finite and nonnegative")
     if self.actor_anchor_weight and (self.task != "Lite3-Velocity-Flat" or not self.resume):
       raise ValueError("actor_anchor_weight requires a Lite3 velocity --resume checkpoint")
+    if self.validate_straight and (self.task != "Lite3-Velocity-Flat" or not self.resume):
+      raise ValueError("validate_straight requires a Lite3 velocity --resume checkpoint")
     if self.task == "Lite3-Velocity-Flat":
       from lite3_supermimic.locomotion.gait import GaitCfg
       GaitCfg(mode=self.gait, bound_enter=self.bound_enter, bound_exit=self.bound_exit)
@@ -686,7 +690,25 @@ class Trainer:
     return path
 
   def run(self) -> None:
+    if not self.cfg.validate_straight:
+      self._run()
+      return
+    from lite3_supermimic.locomotion.validation import StraightValidation
+
+    validation = StraightValidation(self.term.cfg.gait, self.dev, self.cfg.hipx_target_limit)
+    try:
+      self._run(validation)
+    finally:
+      validation.close()
+
+  def _run(self, validation=None) -> None:
     cfg = self.cfg
+    reference = None
+    if validation is not None:
+      reference = validation.evaluate(self.actor)
+      print(f"straight validation reference: {reference}", flush=True)
+      if not reference.passes(reference):
+        raise RuntimeError("reference checkpoint produced no valid straight-walking metrics")
     t_start = time.time()
     while self.buf.size <= cfg.wm_window + 1:
       self.collect()
@@ -737,6 +759,15 @@ class Trainer:
         print(" | ".join(line), flush=True)
         self._collapse_guard(falls_mean)
       if it % cfg.save_interval == 0 or it == cfg.iterations:
+        if validation is not None:
+          candidate = validation.evaluate(self.actor)
+          passed = candidate.passes(reference)
+          for key, value in asdict(candidate).items():
+            self.writer.add_scalar(f"validation/{key}", value, it)
+          print(f"straight validation it {it}: {candidate} | {'PASS' if passed else 'FAIL'}", flush=True)
+          if not passed:
+            print(f"stopping fine-tuning; retained checkpoint: {self.last_ckpt or cfg.resume}", flush=True)
+            return
         if self.collapse_strikes == 0:
           self.last_ckpt = self.save(it)
           print(f"saved {self.last_ckpt}", flush=True)
