@@ -81,6 +81,8 @@ python scripts/eval_velocity.py --checkpoint <完整checkpoint> \
 
 直行奖励对各腿 HipX 偏离默认角超过 0.1 rad 的部分增加惩罚。侧移、转向或过渡到 bound 时会降低此惩罚。用相同的 `--seed`、环境数和速度指令对比检查点。评估输出中的 `hipx_mean_deg` 是按腿统计的有符号平均偏角，`hipx_rms_deg` 衡量偏角整体幅度。续训旧权重时，如果保存的奖励权重和当前版本不同，会先用新奖励重新拟合 critic，再更新 actor。
 
+新训练默认将 HipX 位置目标限制在默认角的 ±0.25 rad 内，并将所有关节目标限制在各自的软限位范围内。评估按检查点恢复动作范围。旧权重可以用 `--hipx-target-limit 0.25` 单独试跑限幅效果。续训时若动作范围变化，会重新拟合 critic，并在此期间冻结 actor 的参数和观测归一化统计量。评估同时报告实际前向平均速度 `vx_mean_m_s` 和平滑后的平均指令 `command_vx_mean_m_s`。
+
 当前未提供此任务训练完成的权重。macOS CPU 检查不能验证 CUDA 并行训练、收敛效果或真机安全运行。固定步态与自动步态的训练设置保存在检查点中，续训使用相同设置。评估可以通过 `--gait` 覆盖，但跨设置表现取决于训练覆盖。
 
 追踪任务和旧 PPO 基线的历史说明见 [迁移记录](docs/SUPERMIMIC_MIGRATION.md) 与 [DreamWaQ／AMP](docs/LEGACY_DREAMWAQ.md)。

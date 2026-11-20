@@ -177,6 +177,34 @@ def test_resuming_legacy_rewards_refits_critic_on_continued_timeline(tmp_path):
     torch.testing.assert_close(value, initial_critic[key])
 
 
+def test_imagined_joint_targets_obey_action_bounds_and_can_leave_saturation():
+  from lite3_supermimic.locomotion.actions import action_bounds
+  from lite3_supermimic.robot.constants import HIP_X_JOINT_INDICES
+  from lite3_supermimic.supermimic.imagine import ImagineCfg
+
+  c = consts(1)
+  low, high = action_bounds(c.default_q, c.action_scale, c.soft_limits, .25)
+  torch.testing.assert_close(low[:, HIP_X_JOINT_INDICES], torch.full((1, 4), -1.))
+  torch.testing.assert_close(high[:, HIP_X_JOINT_INDICES], torch.ones(1, 4))
+  assert high[0, 1] == 8.  # HipY's bounds are determined by its soft joint limits.
+  imag = LocomotionImagination(ImagineCfg(weights=RewardWeights()), c, GaitCfg(), 5, 'cpu', .25)
+  state = torch.zeros(1, st.STATE_DIM)
+  state[:, 0], state[:, 3] = .28, -1
+  request = torch.full((1, 12), 20., requires_grad=True)
+
+  def model(state, action, previous, context, relief):
+    torch.testing.assert_close(action, high)
+    return state, torch.zeros(1, 3)
+
+  result = imag._step(state, torch.zeros(1, 3), torch.zeros(1, 12), torch.zeros(1, 270),
+    initial_state(1, 'cpu'), torch.zeros(1, 4), torch.zeros(1, 12),
+    {'default_q': c.default_q, 'action_scale': c.action_scale, 'soft_limits': c.soft_limits},
+    torch.full((1,), .02), lambda _: request, model)
+  torch.testing.assert_close(result[2], high)
+  result[5].sum().backward()
+  assert (request.grad < 0).all()
+
+
 def test_locomotion_imagination_updates_actor_with_finite_gradients():
   from lite3_supermimic.supermimic.train import Actor, Critic
   from lite3_supermimic.supermimic.imagine import ImagineCfg

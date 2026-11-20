@@ -34,6 +34,8 @@ class TrainCfg:
   gait: str = "auto"
   """Velocity task gait: auto, walk, trot or bound."""
   max_forward: float = 2.0
+  hipx_target_limit: float = 0.25
+  """Maximum HipX target offset in radians. Zero restores legacy unbounded actions."""
   velocity_curriculum_iterations: int = 20_000
   bound_enter: float = 1.5
   bound_exit: float = 1.2
@@ -145,6 +147,8 @@ class TrainCfg:
       GaitCfg(mode=self.gait, bound_enter=self.bound_enter, bound_exit=self.bound_exit)
       if not math.isfinite(self.max_forward) or self.max_forward <= 0:
         raise ValueError("max_forward must be finite and positive")
+      if not math.isfinite(self.hipx_target_limit) or self.hipx_target_limit < 0:
+        raise ValueError("hipx_target_limit must be finite and nonnegative")
       if self.velocity_curriculum_iterations <= 0:
         raise ValueError("velocity_curriculum_iterations must be positive")
     positive = ("num_envs", "buffer_len", "iterations", "collect_steps", "wm_window",
@@ -295,6 +299,11 @@ class Trainer:
     if tuple(self.env.scene["robot"].joint_names) != JOINT_NAMES:
       raise ValueError("Unexpected Lite3 simulation joint order")
     self.consts = st.robot_consts(self.env)
+    self.action_bounds = None
+    if self.locomotion and cfg.hipx_target_limit:
+      from lite3_supermimic.locomotion.actions import action_bounds
+      self.action_bounds = action_bounds(self.consts.default_q, self.consts.action_scale,
+                                         self.consts.soft_limits, cfg.hipx_target_limit)
     self.ctx = st.ContextReader(self.env)
     self.xi = self.ctx.read()
     self.enc_bias = self.env.scene["robot"].data.encoder_bias.clone()
@@ -319,7 +328,7 @@ class Trainer:
                             fall_angle_deg=60.0, weights=command_cfg.reward_weights)
       self.field = None
       self.imag = LocomotionImagination(imag_cfg, self.consts, command_cfg.gait,
-                                         self.history, self.dev)
+                                         self.history, self.dev, cfg.hipx_target_limit)
     else:
       weights = RewardWeights(**{f.name: env_cfg.rewards[f.name].weight
                                  for f in fields(RewardWeights) if f.name in env_cfg.rewards})
@@ -363,11 +372,13 @@ class Trainer:
     if self.locomotion != old_velocity:
       raise ValueError("Velocity/gait and chase checkpoints have different task semantics")
     rewards_changed = False
+    action_bounds_changed = False
     if self.locomotion:
       if ckpt.get("gait_cfg") != asdict(self.term.cfg.gait):
         raise ValueError("Resume with the checkpoint's gait settings")
       old_weights = (ckpt.get("command_cfg") or {}).get("reward_weights")
       rewards_changed = old_weights != asdict(self.term.cfg.reward_weights)
+      action_bounds_changed = ckpt["cfg"].get("hipx_target_limit", 0.0) != self.cfg.hipx_target_limit
     if self.cfg.continue_run:
       self.start_it = int(ckpt.get("iteration", 0))
     wm_sd = self.wm.state_dict()
@@ -391,7 +402,7 @@ class Trainer:
     new_obs_dim = self.obs.shape[-1]
     if old_obs_dim == new_obs_dim:
       self.actor.load_state_dict(ckpt["actor"])
-      if "opt_actor" in ckpt:
+      if "opt_actor" in ckpt and not action_bounds_changed:
         self.opt_actor.load_state_dict(ckpt["opt_actor"])
     else:
       # Warm-start when a task appends LiDAR or a height scan. Shared terms keep
@@ -413,7 +424,7 @@ class Trainer:
     same_critic = all(
       k in ckpt["critic"] and ckpt["critic"][k].shape == v.shape for k, v in critic_sd.items()
     )
-    if same_critic and not (self.cfg.reset_critic or rewards_changed):
+    if same_critic and not (self.cfg.reset_critic or rewards_changed or action_bounds_changed):
       self.critic.load_state_dict(ckpt["critic"])
       if "opt_critic" in ckpt:
         self.opt_critic.load_state_dict(ckpt["opt_critic"])
@@ -423,6 +434,8 @@ class Trainer:
       )
       if rewards_changed:
         print("locomotion reward weights changed; refitting the critic", flush=True)
+      if action_bounds_changed:
+        print("locomotion action bounds changed; refitting the critic", flush=True)
       print(f"critic re-initialised; actor frozen until iteration {self.actor_frozen_until}",
             flush=True)
     print(f"resumed from {path} (iteration {ckpt.get('iteration')})", flush=True)
@@ -461,6 +474,8 @@ class Trainer:
         self.explore.unsqueeze(-1), self.ou, cfg.action_noise * torch.randn_like(a)
       )
       a = a + noise
+      if self.action_bounds is not None:
+        a = a.clamp(*self.action_bounds)
       obs, _, term, trunc, extras = env.step(a)
       done = term | trunc
       if self.driver is not None:
@@ -475,7 +490,9 @@ class Trainer:
         self.wm.update_stats(
           s[keep], a[keep], self.a_prev[keep], self.xi[keep], relief[keep], s1[keep], dpose[keep]
         )
-      self.actor.norm.update(self.obs)
+      if not (self.locomotion and self.actor_frozen_until
+              and getattr(self, "it", self.start_it) <= self.actor_frozen_until):
+        self.actor.norm.update(self.obs)
       # Fast turning (|yaw rate| > 3 rad/s): watches for circling / spinning.
       wz = env.scene["robot"].data.root_link_ang_vel_b[:, 2].abs()
       self.ep_stats["Metrics/fast_yaw"].append(float((wz > 3.0).float().mean()))

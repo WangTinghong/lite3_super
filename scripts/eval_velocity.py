@@ -10,6 +10,7 @@ import os
 import torch
 
 from lite3_supermimic.checkpoint import validate_checkpoint
+from lite3_supermimic.locomotion.actions import action_bounds
 from lite3_supermimic.locomotion.gait import GaitCfg, GAITS, foot_schedule
 from lite3_supermimic.robot.constants import HIP_X_JOINT_INDICES, LEGS
 from lite3_supermimic.supermimic import state as st
@@ -18,10 +19,15 @@ from lite3_supermimic.supermimic import state as st
 class VelocityEvaluation:
   """Share command playback and metrics between the batch loop and mjlab viewer."""
 
-  def __init__(self, env, args):
+  def __init__(self, env, args, hipx_target_limit=0.0):
     self.unwrapped = env
     self.cfg, self.num_envs, self.device = env.cfg, env.num_envs, env.device
     self.term = env.command_manager.get_term("velocity")
+    self.action_bounds = None
+    if hipx_target_limit:
+      consts = st.robot_consts(env)
+      self.action_bounds = action_bounds(consts.default_q, consts.action_scale,
+                                         consts.soft_limits, hipx_target_limit)
     self.command_cycle = torch.tensor(
       [(vx, args.vy, args.yaw_rate) for vx in (0.0, 0.2, 0.8, 1.8, 0.8, 0.0)],
       device=self.device, dtype=self.term.state.dtype,
@@ -33,7 +39,7 @@ class VelocityEvaluation:
     self.step_index = 0
     self.metrics = {
       name: {"samples": 0, "velocity_squared_error": 0., "yaw_squared_error": 0.,
-             "falls": 0, "foot_phase_agreement": 0.,
+             "falls": 0, "foot_phase_agreement": 0., "vx_sum": 0., "command_vx_sum": 0.,
              "hipx_sum": self.term.state.new_zeros(len(LEGS)),
              "hipx_squared_sum": self.term.state.new_zeros(len(LEGS))}
       for name in ("stand", *GAITS)
@@ -51,6 +57,8 @@ class VelocityEvaluation:
     segment = int(self.step_index * env.step_dt / 5) % len(self.command_cycle)
     self.term.state[:, :3] = self.command_cycle[segment]
     command = self.term.state.clone()
+    if self.action_bounds is not None:
+      action = action.clamp(*self.action_bounds)
     result = env.step(action)
     self.obs, _, terminated, truncated, _ = result
     # Auto-reset states must be excluded from kinematic errors.
@@ -71,6 +79,8 @@ class VelocityEvaluation:
       values["velocity_squared_error"] += float((s[valid, 4:6] - command[valid, 3:5]).square().sum())
       values["yaw_squared_error"] += float((s[valid, 9] - command[valid, 5]).square().sum())
       values["foot_phase_agreement"] += float(agree[valid].sum())
+      values["vx_sum"] += float(s[valid, st.V_YAW.start].sum())
+      values["command_vx_sum"] += float(command[valid, 3].sum())
       valid_hipx = hipx[valid]
       values["hipx_sum"] += valid_hipx.sum(dim=0)
       values["hipx_squared_sum"] += valid_hipx.square().sum(dim=0)
@@ -90,6 +100,8 @@ class VelocityEvaluation:
         result[name] = {
           "velocity_rmse_m_s": math.sqrt(values["velocity_squared_error"] / n),
           "yaw_rmse_rad_s": math.sqrt(values["yaw_squared_error"] / n),
+          "vx_mean_m_s": values["vx_sum"] / n,
+          "command_vx_mean_m_s": values["command_vx_sum"] / n,
           "foot_phase_agreement": values["foot_phase_agreement"] / n,
           "hipx_mean_deg": dict(zip(LEGS, torch.rad2deg(values["hipx_sum"] / n).tolist())),
           "hipx_rms_deg": dict(zip(LEGS, torch.rad2deg((values["hipx_squared_sum"] / n).sqrt()).tolist())),
@@ -107,6 +119,7 @@ def main():
   ap.add_argument("--vx", type=float, default=None, help="Fixed command. Omit for an acceleration/deceleration cycle.")
   ap.add_argument("--vy", type=float, default=0)
   ap.add_argument("--yaw-rate", type=float, default=0)
+  ap.add_argument("--hipx-target-limit", type=float, help="Override the checkpoint's action limits for comparison.")
   ap.add_argument("--gait", choices=("auto", *GAITS), default=None)
   ap.add_argument("--video", help="Optional MP4 of environment zero.")
   ap.add_argument("--viewer", action="store_true", help="Open a live MuJoCo window on this desktop.")
@@ -117,6 +130,9 @@ def main():
     ap.error("environment count and duration must be positive, commands must be finite")
   if args.vx is not None and not math.isfinite(args.vx):
     ap.error("--vx must be finite")
+  if args.hipx_target_limit is not None and (
+      not math.isfinite(args.hipx_target_limit) or args.hipx_target_limit < 0):
+    ap.error("--hipx-target-limit must be finite and nonnegative")
   if args.viewer and sys.platform.startswith("linux") and not (
       os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
     ap.error("--viewer needs a graphical display. Run this command in a terminal inside the remote desktop.")
@@ -130,6 +146,9 @@ def main():
   validate_checkpoint(ckpt)
   if ckpt.get("cfg", {}).get("task") != "Lite3-Velocity-Flat":
     raise ValueError("Expected a Lite3-Velocity-Flat checkpoint")
+  hipx_target_limit = ckpt["cfg"].get("hipx_target_limit", 0.)
+  if args.hipx_target_limit is not None:
+    hipx_target_limit = args.hipx_target_limit
   cfg = load_env_cfg("Lite3-Velocity-Flat", play=True)
   cfg.scene.num_envs = args.num_envs
   cfg.seed = args.seed
@@ -142,7 +161,7 @@ def main():
   env = ManagerBasedRlEnv(cfg=cfg, device="cuda:0", render_mode="rgb_array" if args.video else None)
   with ExitStack() as stack:
     stack.callback(env.close)
-    evaluation = VelocityEvaluation(env, args)
+    evaluation = VelocityEvaluation(env, args, hipx_target_limit)
     obs, _ = evaluation.reset()
     actor = Actor(obs["actor"].shape[-1], tuple(ckpt["cfg"]["actor_hidden"]), 12).to(env.device)
     actor.load_state_dict(ckpt["actor"])
