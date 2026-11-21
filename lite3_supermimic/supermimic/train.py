@@ -45,6 +45,8 @@ class TrainCfg:
   """Fraction of moving commands reserved for pure forward motion in the fast band."""
   fast_straight_min: float = 0.9
   fast_straight_max: float = 1.1
+  mid_straight_reward: bool = False
+  """Penalize per-axis tracking errors more strongly during 1.10–1.30 m/s straight motion."""
   bound_enter: float = 1.5
   bound_exit: float = 1.2
   num_envs: int = 2048
@@ -171,6 +173,8 @@ class TrainCfg:
       raise ValueError("fast_straight_fraction must be nonnegative and leave room for pure_side_fraction")
     if self.fast_straight_fraction and self.task != "Lite3-Velocity-Flat":
       raise ValueError("fast_straight_fraction requires the Lite3 velocity task")
+    if self.mid_straight_reward and self.task != "Lite3-Velocity-Flat":
+      raise ValueError("mid_straight_reward requires the Lite3 velocity task")
     if self.task == "Lite3-Velocity-Flat":
       from lite3_supermimic.locomotion.gait import GaitCfg
       GaitCfg(mode=self.gait, bound_enter=self.bound_enter, bound_exit=self.bound_exit)
@@ -313,6 +317,10 @@ class Trainer:
       command_cfg.fast_straight_fraction = cfg.fast_straight_fraction
       command_cfg.fast_straight_min = cfg.fast_straight_min
       command_cfg.fast_straight_max = cfg.fast_straight_max
+      if cfg.mid_straight_reward:
+        command_cfg.reward_weights.mid_straight_vx_error = -0.40
+        command_cfg.reward_weights.mid_straight_vy_error = -0.35
+        command_cfg.reward_weights.mid_straight_yaw_error = -0.25
       if cfg.expert_policy:
         raise ValueError("Velocity training currently collects with its own actor; omit --expert-policy")
     else:
@@ -413,7 +421,12 @@ class Trainer:
       if ckpt.get("gait_cfg") != asdict(self.term.cfg.gait):
         raise ValueError("Resume with the checkpoint's gait settings")
       old_weights = (ckpt.get("command_cfg") or {}).get("reward_weights")
-      rewards_changed = old_weights != asdict(self.term.cfg.reward_weights)
+      new_weights = asdict(self.term.cfg.reward_weights)
+      # A term absent in a checkpoint did not contribute to that policy's reward.
+      rewards_changed = old_weights is None or any(
+        old_weights.get(name, 0.0) != new_weights.get(name, 0.0)
+        for name in old_weights.keys() | new_weights.keys()
+      )
       action_bounds_changed = ckpt["cfg"].get("hipx_target_limit", 0.0) != self.cfg.hipx_target_limit
     if self.cfg.continue_run:
       self.start_it = int(ckpt.get("iteration", 0))

@@ -99,6 +99,8 @@ python scripts/eval_velocity.py --checkpoint <完整checkpoint> \
 
 用 `--fast-straight-min 1.10 --fast-straight-max 1.30` 可将这部分样本集中到 1.1–1.3 m/s。其余指令继续按速度课程采样。
 
+加 `--mid-straight-reward true` 可在目标速度为 1.10–1.30 m/s 的纯直行 trot 段，对前向、侧向和偏航误差分别加罚。平滑后的前向指令从 0.90 升到 1.10 m/s 时逐渐增大惩罚权重。目标和平滑指令的侧向速度或偏航角速度有一项非零时，使用原有的跟踪奖励。对比同一初始权重的续训结果时，先看 1.30 m/s 的前向误差、侧漂和偏航误差，再做低速回归。
+
 平地速度任务将 critic 自举值限制在当前奖励所允许的折扣回报上限。默认权重下，每步最高 0.1 分，长期回报最多 10 分。训练日志分别记录想象步内累计奖励 `imagined_step_return`、末端 critic 原始估值 `critic_terminal_value`，以及计入 actor 目标的 `imagined_bootstrap_return`。要排查末端估值的影响，可用 `--actor-bootstrap-weight 0`，此时 actor 仍通过世界模型优化想象步内奖励，critic 继续拟合自己的价值目标。
 
 当前未提供此任务训练完成的权重。macOS CPU 检查不能验证 CUDA 并行训练、收敛效果或真机安全运行。固定步态与自动步态的训练设置保存在检查点中，续训使用相同设置。评估可以通过 `--gait` 覆盖，但跨设置表现取决于训练覆盖。

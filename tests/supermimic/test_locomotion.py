@@ -90,11 +90,12 @@ def test_env_and_imagined_rewards_share_command_timing():
   c = consts(2)
   state = torch.zeros(2, st.STATE_DIM)
   state[:, 0], state[:, 3] = .28, -1
+  state[:, st.V_YAW.start] = 1.15
   command = initial_state(2, 'cpu')
-  command[:, 0] = 2
+  command[:, 0], command[:, 3], command[:, 10] = 1.30, 1.20, 1
   action = torch.full((2, 12), .1)
   previous = torch.zeros_like(action)
-  weights = RewardWeights()
+  weights = RewardWeights(mid_straight_vx_error=-.40)
   expected = weighted_reward(reward_terms(state, action, previous, command, c, cfg), weights)
   # Environment wrapper must use the same pre-advance command and action history.
   term = SimpleNamespace(state=command, robot_consts=c, cfg=SimpleNamespace(gait=cfg))
@@ -115,6 +116,35 @@ def test_env_and_imagined_rewards_share_command_timing():
   death = imag.fall_prob(state)
   torch.testing.assert_close(result[5], (expected + weights.terminated * death) * .02)
   torch.testing.assert_close(result[4], advance(command, .02, cfg))
+
+
+def test_mid_speed_reward_is_axis_specific_and_applies_only_to_straight_trot():
+  n = 10
+  command = initial_state(n, 'cpu')
+  command[:, 0], command[:, 3], command[:, 10] = 1.30, 1.20, 1
+  command[4, 0:4:3] = .5                   # Low target and effective command.
+  command[5, 1] = .08                      # Lateral target just arrived.
+  command[6, 2] = -.2                      # Turning target just arrived.
+  command[7, 4] = .08                      # Previous lateral command still settling.
+  command[8, 10] = 2                       # Bound held during deceleration.
+  command[9, 0] = 1.6                      # High-speed target during acceleration.
+  state = torch.zeros(n, st.STATE_DIM)
+  state[:, st.V_YAW.start] = command[:, 3]
+  state[1, st.V_YAW.start] -= .06
+  state[2, st.V_YAW.start + 1] = .03
+  state[3, st.W_B.stop - 1] = .08
+  state[4:, st.V_YAW.start + 1] = .03
+  state.requires_grad_(True)
+  action = torch.zeros(n, 12)
+  terms = reward_terms(state, action, action, command, consts(n), GaitCfg())
+  axes = torch.stack([terms[f'mid_straight_{axis}_error'] for axis in ('vx', 'vy', 'yaw')], -1)
+  assert torch.equal(axes[1:4] > 0, torch.eye(3, dtype=torch.bool))
+  assert torch.count_nonzero(axes[0]) == 0
+  assert torch.count_nonzero(axes[4:]) == 0
+  axes.sum().backward()
+  assert state.grad[1, st.V_YAW.start] < 0
+  assert state.grad[2, st.V_YAW.start + 1] > 0
+  assert state.grad[3, st.W_B.stop - 1] > 0
 
 
 def test_hipx_reward_penalizes_both_sides_and_relaxes_during_maneuvers():
