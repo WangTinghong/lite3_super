@@ -67,12 +67,18 @@ class LocomotionImagination(Imagination):
     relief = s.new_zeros(s.shape[0], st.SCAN_POINTS)
     if self.field is not None:
       relief = tr.relief(pose[:, :2], pose[:, 2], self.field, grad=True)
-    s_next, dpose = wm(s, action, a_prev, xi, relief)
+    contacts = None
+    if self.cfg.weights.stair_swing_contact:
+      s_next, dpose, logits = wm.forward_with_contacts(s, action, a_prev, xi, relief)
+      contacts = logits.sigmoid()
+    else:
+      s_next, dpose = wm(s, action, a_prev, xi, relief)
     pose_next = st.apply_pose_delta(pose, dpose)
     constants = st.RobotConsts(k["default_q"], k["action_scale"], self.c.kp,
                                self.c.kd, self.c.effort, k["soft_limits"])
     foot_velocity_xy = None
-    if self.cfg.weights.turn_contact_slip or self.cfg.weights.turn_swing_clearance:
+    turn_foot_terms = bool(self.cfg.weights.turn_contact_slip or self.cfg.weights.turn_swing_clearance)
+    if turn_foot_terms or contacts is not None:
       previous_feet = st.limb_points_world(s, pose)["feet"][..., :2]
       next_feet = st.limb_points_world(s_next, pose_next)["feet"][..., :2]
       foot_velocity_xy = (next_feet - previous_feet) / dt.reshape(-1, 1, 1).clamp_min(1e-6)
@@ -87,6 +93,7 @@ class LocomotionImagination(Imagination):
     terms = reward_terms(s_next, action, a_prev, command, constants, self.gait_cfg,
                          foot_velocity_xy=foot_velocity_xy, front_rise=rise,
                          stair_edge=edge, stair_heading=pose_next[:, 2],
+                         stair_contact=contacts, turn_foot_terms=turn_foot_terms,
                          front_clearance_enabled=bool(self.cfg.weights.turn_front_clearance),
                          foot_height=local_foot_heights(s_next, pose_next, self.field)
                          if self.field is not None else None)

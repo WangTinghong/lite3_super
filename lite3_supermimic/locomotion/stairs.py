@@ -10,6 +10,30 @@ HALF_WIDTH = 1.25
 EDGE_PROXIMITY_TERM = ("stair_edge_proximity", 4)
 # The shank capsule extends farther down than the 22 mm foot sphere.
 SHANK_RADIUS = .025
+STAIR_CONTACT_SENSOR = "stair_foot_contacts"
+
+
+def add_stair_contact_sensor(cfg):
+  from mjlab.sensor import ContactMatch, ContactSensorCfg
+
+  # Either geom can drag. Include the ground and riser faces in the same sensor.
+  cfg.scene.sensors += (ContactSensorCfg(
+    name=STAIR_CONTACT_SENSOR,
+    primary=ContactMatch(mode="geom", pattern=r"[FH][LR]_(FOOT|SHANK)_collision", entity="robot"),
+    fields=("found",), reduce="maxforce", num_slots=1,
+  ),)
+
+
+def stair_contacts(env, term):
+  from lite3_supermimic.supermimic import state as st
+
+  sensor = env.scene[STAIR_CONTACT_SENSOR]
+  if not hasattr(term, "stair_contact_columns"):
+    names = list(sensor.primary_names)
+    term.stair_contact_columns = [names.index(f"{leg}_{part}_collision")
+                                  for leg in st.LEGS for part in ("FOOT", "SHANK")]
+  found = sensor.data.found[:, term.stair_contact_columns] > 0
+  return found.reshape(env.num_envs, len(st.LEGS), -1).any(-1)
 
 
 class StairField:

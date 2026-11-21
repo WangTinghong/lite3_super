@@ -7,7 +7,7 @@ import torch
 from lite3_supermimic.locomotion.actions import action_bounds
 from lite3_supermimic.locomotion.footfalls import summarize_footfalls, summarize_swings
 from lite3_supermimic.locomotion.gait import GAITS, foot_schedule
-from lite3_supermimic.locomotion.stairs import HALF_WIDTH, riser_crossing_clearance
+from lite3_supermimic.locomotion.stairs import HALF_WIDTH, STAIR_CONTACT_SENSOR, riser_crossing_clearance, stair_contacts
 from lite3_supermimic.robot.constants import HIP_X_JOINT_INDICES, JOINT_NAMES, LEGS
 from lite3_supermimic.supermimic import state as st
 
@@ -52,6 +52,7 @@ class VelocityEvaluation:
     self.cfg, self.num_envs, self.device = env.cfg, env.num_envs, env.device
     self.term = env.command_manager.get_term("velocity")
     self.stair_field = getattr(self.term, "height_field", None)
+    self.track_stair_contacts = (self.stair_field is not None and STAIR_CONTACT_SENSOR in env.scene.sensors)
     if self.stair_field is not None:
       self.stair_valid = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
       self.stair_success = torch.zeros_like(self.stair_valid)
@@ -61,6 +62,10 @@ class VelocityEvaluation:
       self.stair_edges = self.term.state.new_tensor(self.stair_field.edges)
       self.edge_clearance = self.term.state.new_full((self.num_envs, len(LEGS), self.stair_edges.numel()),
                                                      math.nan)
+    if self.track_stair_contacts:
+      self.swing_samples = torch.zeros(len(st.LEGS), dtype=torch.long, device=self.device)
+      self.swing_contacts = torch.zeros_like(self.swing_samples)
+      self.swing_drag = torch.zeros_like(self.swing_samples)
     self.action_bounds = None
     if hipx_target_limit:
       consts = st.robot_consts(env)
@@ -189,6 +194,16 @@ class VelocityEvaluation:
         self.previous_stair_feet, feet, self.stair_edges, self.stair_field.height)
       first_crossing = crossed & self.stair_valid[:, None, None] & self.edge_clearance.isnan()
       self.edge_clearance = torch.where(first_crossing, clearance, self.edge_clearance)
+      if self.track_stair_contacts:
+        phase, duty, _, _ = foot_schedule(command, self.term.cfg.gait)
+        progress = (phase - duty) / (1. - duty)
+        mid_swing = ((progress >= .25) & (progress <= .80) & self.stair_valid[:, None]
+                     & (command[:, 3:4] > self.term.cfg.gait.stand_speed))
+        touch_in_swing = mid_swing & stair_contacts(env, self.term)
+        foot_speed = (feet[..., :2] - self.previous_stair_feet[..., :2]).norm(dim=-1) / env.step_dt
+        self.swing_samples += mid_swing.sum(0)
+        self.swing_contacts += touch_in_swing.sum(0)
+        self.swing_drag += (touch_in_swing & (foot_speed >= .05)).sum(0)
       self.previous_stair_feet = feet
       front = feet[:, :2]
       cleared = ((front[..., 0] > self.stair_edges[0] + st.FOOT_RADIUS)
@@ -314,6 +329,13 @@ class VelocityEvaluation:
         "max_forward_x_m_by_env": [value if math.isfinite(value) else None
                                    for value in self.stair_max_x.tolist()],
       }
+    if self.track_stair_contacts:
+      result["stairs"]["mid_swing_contacts"] = {
+        leg: {"samples": n, "in_contact": touch, "moving_in_contact": drag,
+              "contact_fraction": touch / n if n else None, "drag_fraction": drag / n if n else None}
+        for leg, n, touch, drag in zip(st.LEGS, self.swing_samples.tolist(),
+                                      self.swing_contacts.tolist(), self.swing_drag.tolist())
+      }
     if self.segment_metrics:
       segments = []
       for index, (speed, values) in enumerate(zip(self.vx_sequence, self.segment_metrics)):
@@ -366,9 +388,10 @@ def velocity_play_cfg(gait_cfg, num_envs, seed=None, *, record_footfalls=False, 
     from lite3_supermimic.locomotion.stairs import add_front_rise_observation
     add_front_rise_observation(cfg, step_height, edge_preview=edge_preview)
   if stair_level:
-    from lite3_supermimic.locomotion.stairs import configure_stair_course
+    from lite3_supermimic.locomotion.stairs import add_stair_contact_sensor, configure_stair_course
 
     configure_stair_course(cfg, stair_level)
+    add_stair_contact_sensor(cfg)
   if step_height is not None:
     import mujoco
     from mjlab.entity import EntityCfg

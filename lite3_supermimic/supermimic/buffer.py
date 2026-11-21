@@ -37,7 +37,7 @@ def unpack_generator(gen, packed: torch.Tensor) -> torch.Tensor:
 
 class ReplayBuffer:
   def __init__(self, num_envs: int, length: int, obs_dim: int, device: str,
-               gen_dim: int = GEN_DIM):
+               gen_dim: int = GEN_DIM, *, store_contacts=False):
     self.n, self.L, self.device = num_envs, length, device
     f = lambda *shape: torch.zeros(num_envs, length, *shape, device=device)  # noqa: E731
     self.s = f(st.STATE_DIM)
@@ -49,14 +49,18 @@ class ReplayBuffer:
     self.relief = torch.zeros(num_envs, length, SCAN_POINTS, device=device, dtype=torch.float16)
     self.gen = f(gen_dim)
     self.done = f()
+    self.contacts = (torch.zeros(num_envs, length, len(st.LEGS), device=device, dtype=torch.bool)
+                     if store_contacts else None)
     self.ptr = 0
     self.size = 0
 
-  def add(self, s, pose, a, a_prev, obs, gen, done, relief) -> None:
+  def add(self, s, pose, a, a_prev, obs, gen, done, relief, *, contacts=None) -> None:
     i = self.ptr
     self.s[:, i], self.pose[:, i], self.a[:, i], self.a_prev[:, i] = s, pose, a, a_prev
     self.relief[:, i] = relief.half()
     self.obs[:, i], self.gen[:, i], self.done[:, i] = obs.half(), gen, done.float()
+    if self.contacts is not None:
+      self.contacts[:, i] = contacts
     self.ptr = (self.ptr + 1) % self.L
     self.size = min(self.size + 1, self.L)
 
@@ -82,15 +86,12 @@ class ReplayBuffer:
     return env, t
 
 
-WINDOW_KEYS = ("s", "pose", "a", "a_prev", "xi", "valid", "relief")
-
-
 class WindowArchive:
   """Ring store of k-step world-model windows with rare events (contact changes,
   flight, falls). Unlike the replay buffer it is not overwritten every few
   seconds of sim time, so the world model keeps seeing jumps and landings."""
 
-  def __init__(self, capacity: int, k: int, context_dim: int, device: str):
+  def __init__(self, capacity: int, k: int, context_dim: int, device: str, *, store_contacts=False):
     self.cap, self.device = capacity, device
     z = lambda *shape: torch.zeros(capacity, *shape, device=device)  # noqa: E731
     self.data = {
@@ -98,6 +99,8 @@ class WindowArchive:
       "a_prev": z(k, st.NUM_JOINTS), "xi": z(context_dim), "valid": z(k),
       "relief": torch.zeros(capacity, k, SCAN_POINTS, device=device, dtype=torch.float16),
     }
+    if store_contacts:
+      self.data["contacts"] = torch.zeros(capacity, k, len(st.LEGS), device=device, dtype=torch.bool)
     self.ptr = 0
     self.size = 0
 
@@ -107,7 +110,7 @@ class WindowArchive:
       return
     n = min(n, self.cap)
     idx = (self.ptr + torch.arange(n, device=self.device)) % self.cap
-    for k in WINDOW_KEYS:
+    for k in self.data:
       self.data[k][idx] = windows[k][:n]
     self.ptr = (self.ptr + n) % self.cap
     self.size = min(self.size + n, self.cap)

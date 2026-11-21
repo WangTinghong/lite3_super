@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from lite3_supermimic.supermimic import state as st
 from lite3_supermimic.target.terrain import SCAN_POINTS
@@ -55,7 +56,7 @@ class WorldModel(nn.Module):
   of the local ground grid (terrain and obstacles, see target/terrain.py), so
   stepping onto a stair or pushing into a wall is predictable."""
 
-  def __init__(self, hidden: tuple[int, ...] = (1024, 1024, 1024)):
+  def __init__(self, hidden: tuple[int, ...] = (1024, 1024, 1024), *, predict_contacts=False):
     super().__init__()
     in_dim = st.STATE_DIM + 2 * st.NUM_JOINTS + st.CONTEXT_DIM + SCAN_POINTS
     out_dim = st.STATE_DIM + st.POSE_DELTA_DIM
@@ -63,6 +64,7 @@ class WorldModel(nn.Module):
     self.in_norm = RunningNorm(in_dim)
     # Normalizes the per-step change of s and the pose delta.
     self.out_norm = RunningNorm(out_dim)
+    self.contact_head = nn.Linear(self.net[-1].in_features, len(st.LEGS)) if predict_contacts else None
 
   @staticmethod
   def _inputs(s, a, a_prev, xi, relief):
@@ -75,10 +77,22 @@ class WorldModel(nn.Module):
   def forward(self, s, a, a_prev, xi, relief):
     """relief (B, P): ground under the base minus the ground at each scan point.
     Returns (s_next, pose_delta)."""
-    y = self.out_norm.unnormalize(self.net(self.in_norm(self._inputs(s, a, a_prev, xi, relief))))
+    inputs = self.in_norm(self._inputs(s, a, a_prev, xi, relief))
+    return self._decode(s, self.net(inputs))
+
+  def _decode(self, s, output):
+    y = self.out_norm.unnormalize(output)
     return s + y[:, : st.STATE_DIM], y[:, st.STATE_DIM :]
 
-  def loss(self, s0, actions, actions_prev, xi, reliefs, s_targets, pose_targets, valid):
+  def forward_with_contacts(self, s, a, a_prev, xi, relief):
+    features = self.in_norm(self._inputs(s, a, a_prev, xi, relief))
+    for index in range(len(self.net) - 1):
+      features = self.net[index](features)
+    s_next, pose_delta = self._decode(s, self.net[-1](features))
+    return s_next, pose_delta, self.contact_head(features)
+
+  def loss(self, s0, actions, actions_prev, xi, reliefs, s_targets, pose_targets, valid,
+           *, contact_targets=None):
     """k-step autoregressive loss in normalized output units.
 
     s0 (B, S); actions, actions_prev (B, k, 12); xi (B, C); reliefs (B, k, P) at
@@ -90,7 +104,14 @@ class WorldModel(nn.Module):
     s = s0
     total, denom = 0.0, valid.sum().clamp(min=1.0)
     for j in range(k):
-      s_pred, pose_pred = self(s, actions[:, j], actions_prev[:, j], xi, reliefs[:, j])
+      inputs = (s, actions[:, j], actions_prev[:, j], xi, reliefs[:, j])
+      if contact_targets is None:
+        s_pred, pose_pred = self(*inputs)
+      else:
+        s_pred, pose_pred, logits = self.forward_with_contacts(*inputs)
+        contact_loss = F.binary_cross_entropy_with_logits(logits, contact_targets[:, j].float(),
+                                                          reduction="none").mean(-1)
+        total = total + 0.25 * (contact_loss * valid[:, j]).sum()
       err = torch.cat([s_pred - s_targets[:, j], pose_pred - pose_targets[:, j]], dim=-1)
       total = total + ((err / scale) ** 2).mean(-1).mul(valid[:, j]).sum()
       s = s_pred

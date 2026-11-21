@@ -241,7 +241,7 @@ def main():
     obs, _ = env.reset()
     actor = Actor(obs["actor"].shape[-1], tuple(cfg["actor_hidden"]), 12).to(env.device)
     actor.load_state_dict(checkpoint["actor"])
-    model = WorldModel(tuple(cfg["wm_hidden"])).to(env.device)
+    model = WorldModel(tuple(cfg["wm_hidden"]), predict_contacts=cfg.get("stair_contact_learning", False)).to(env.device)
     model.load_state_dict(checkpoint["world_model"])
     actor.eval()
     model.eval()

@@ -678,3 +678,42 @@ def test_riser_crossing_clearance_interpolates_height_and_requires_uphill_motion
   crossed, clearance = riser_crossing_clearance(before, after, edges, .02)
   assert crossed.nonzero().tolist() == [[0, 0, 0], [0, 3, 1]]
   torch.testing.assert_close(clearance[crossed], torch.tensor([.028, -.017]), atol=1e-6, rtol=0.)
+
+
+def test_stair_contact_cost_penalizes_swing_contact_and_drag():
+  cfg = GaitCfg()
+  command = initial_state(1, 'cpu')
+  command[:, 3] = .3
+  command[:, 6] = .875
+  state = torch.zeros(1, st.STATE_DIM)
+  action = torch.zeros(1, st.NUM_JOINTS)
+  feet_velocity = torch.zeros(1, 4, 2)
+  feet_velocity[0, 0, 0] = .22
+  contact = torch.ones(1, 4, requires_grad=True)
+  edge = (torch.zeros(1, 4), torch.zeros(1, 4))
+  terms = reward_terms(state, action, action, command, consts(1), cfg, stair_edge=edge,
+                       stair_heading=torch.zeros(1), stair_contact=contact,
+                       foot_velocity_xy=feet_velocity, turn_foot_terms=False)
+  assert terms["stair_swing_contact"].item() == pytest.approx(1.)
+  assert terms["stair_contact_slip"].item() == pytest.approx(1. - torch.exp(torch.tensor(-1.)).item())
+  grad, = torch.autograd.grad((terms["stair_swing_contact"] + terms["stair_contact_slip"]).sum(), contact)
+  assert grad[0, 0] > 0 and grad.count_nonzero() == 1
+
+
+def test_world_model_contact_head_uses_only_valid_transition_targets():
+  from lite3_supermimic.supermimic.world_model import WorldModel
+
+  model = WorldModel((8,), predict_contacts=True)
+  s = torch.zeros(2, st.STATE_DIM)
+  a = torch.zeros(2, 2, st.NUM_JOINTS)
+  context = torch.zeros(2, st.CONTEXT_DIM)
+  relief = torch.zeros(2, 2, st.SCAN_POINTS)
+  targets, pose_targets = torch.zeros(2, 2, st.STATE_DIM), torch.zeros(2, 2, st.POSE_DELTA_DIM)
+  valid = torch.tensor([[1., 0.], [1., 1.]])
+  contacts = torch.zeros(2, 2, len(st.LEGS), dtype=torch.bool)
+  loss = model.loss(s, a, a, context, relief, targets, pose_targets, valid, contact_targets=contacts)
+  contacts[0, 1] = True
+  torch.testing.assert_close(
+    loss, model.loss(s, a, a, context, relief, targets, pose_targets, valid, contact_targets=contacts))
+  loss.backward()
+  assert model.contact_head.bias.grad.abs().min() > 0

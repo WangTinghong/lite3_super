@@ -21,6 +21,8 @@ class RewardWeights:
   stair_front_shortfall: float = 0.0
   stair_edge_shortfall: float = 0.0
   stair_forward_tracking: float = 0.0
+  stair_swing_contact: float = 0.0
+  stair_contact_slip: float = 0.0
   bound_pair_sync: float = 0.0
   bound_pair_timing: float = 0.0
   turn_contact_slip: float = 0.0
@@ -63,7 +65,8 @@ def bound_pair_errors(height, stance):
 
 def reward_terms(s, action, previous_action, command, consts, gait: GaitCfg, *,
                  foot_velocity_xy=None, front_clearance_enabled=False, foot_height=None,
-                 front_rise=None, stair_edge=None, stair_heading=None):
+                 front_rise=None, stair_edge=None, stair_heading=None, stair_contact=None,
+                 turn_foot_terms=True):
   target_velocity = command[:, :3]
   velocity = command[:, 3:6]
   planar_error = s[:, st.V_YAW][:, :2] - velocity[:, :2]
@@ -80,11 +83,11 @@ def reward_terms(s, action, previous_action, command, consts, gait: GaitCfg, *,
   bound_weight = (command[:, 10] == 2) * command[:, 9].square()
   pair_sync, pair_timing = bound_pair_errors(height, stance)
   turn = turn_slip = turn_clearance = front_clearance = torch.zeros_like(velocity[:, 2])
-  if foot_velocity_xy is not None or front_clearance_enabled:
+  if (foot_velocity_xy is not None and turn_foot_terms) or front_clearance_enabled:
     turn = ((velocity[:, 2].abs() - 0.10) / 0.20).clamp(0., 1.)
     turn = turn * ((target_velocity[:, :2].abs().amax(dim=-1) <= 1e-4)
                    & (velocity[:, :2].norm(dim=-1) < 0.03))
-  if foot_velocity_xy is not None:
+  if foot_velocity_xy is not None and turn_foot_terms:
     support = torch.sigmoid((0.012 - height) / 0.006)
     speed_error = -torch.expm1(-foot_velocity_xy.square().sum(-1) / 0.14**2)
     turn_slip = turn * (support * speed_error).mean(-1)
@@ -109,6 +112,7 @@ def reward_terms(s, action, previous_action, command, consts, gait: GaitCfg, *,
   height_error = (height - swing_height).square()
   moving = (velocity[:, :2].norm(dim=-1) + velocity[:, 2].abs()) > gait.stand_speed
   edge_cost = forward_tracking = torch.zeros_like(yaw_error)
+  stair_touchdown = stair_slip = torch.zeros_like(yaw_error)
   if stair_edge is not None:
     proximity, clearance = stair_edge
     progress = ((phase - duty) / (1. - duty)).clamp(0., 1.)
@@ -120,6 +124,12 @@ def reward_terms(s, action, previous_action, command, consts, gait: GaitCfg, *,
     vx, vy = s[:, st.V_YAW][:, :2].unbind(-1)
     course_vx = vx * stair_heading.cos() - vy * stair_heading.sin()
     forward_tracking = forward * torch.exp(-((course_vx - velocity[:, 0]) / .18).square())
+    if stair_contact is not None:
+      # Count contact away from swing boundaries, including swings between risers.
+      stair_touchdown = forward * (swing * stair_contact).sum(-1)
+      speed_squared = foot_velocity_xy.square().sum(-1)
+      speed_cost = -torch.expm1(-speed_squared / .22**2)
+      stair_slip = forward * (stair_contact * speed_cost).sum(-1)
   joint_offset = s[:, st.Q]
   hipx_excess = (joint_offset[:, HIP_X_JOINT_INDICES].abs() - 0.1).clamp_min(0)
   # Leave room for balancing corrections, side steps, turns and bound.
@@ -141,6 +151,8 @@ def reward_terms(s, action, previous_action, command, consts, gait: GaitCfg, *,
     "stair_front_shortfall": stair_cost,
     "stair_edge_shortfall": edge_cost,
     "stair_forward_tracking": forward_tracking,
+    "stair_swing_contact": stair_touchdown,
+    "stair_contact_slip": stair_slip,
     "bound_pair_sync": bound_weight * pair_sync,
     "bound_pair_timing": bound_weight * pair_timing,
     "turn_contact_slip": turn_slip,

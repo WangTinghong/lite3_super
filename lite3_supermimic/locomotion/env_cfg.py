@@ -20,7 +20,12 @@ def locomotion_reward(env):
   if not hasattr(term, "robot_consts"):
     term.robot_consts = st.robot_consts(env)
   foot_velocity_xy = None
-  if weights.turn_contact_slip or weights.turn_swing_clearance:
+  turn_foot_terms = bool(weights.turn_contact_slip or weights.turn_swing_clearance)
+  contacts = None
+  if weights.stair_swing_contact:
+    from lite3_supermimic.locomotion.stairs import stair_contacts
+    contacts = stair_contacts(env, term)
+  if turn_foot_terms or contacts is not None:
     if not hasattr(term, "foot_site_ids"):
       term.foot_site_ids, _ = term.robot.find_sites(st.FOOT_SITES, preserve_order=True)
     foot_velocity_xy = term.robot.data.site_lin_vel_w[:, term.foot_site_ids, :2]
@@ -44,6 +49,7 @@ def locomotion_reward(env):
     term.state, term.robot_consts, term.cfg.gait, foot_velocity_xy=foot_velocity_xy,
     front_clearance_enabled=bool(weights.turn_front_clearance),
     foot_height=height, front_rise=rise, stair_edge=edge, stair_heading=heading,
+    stair_contact=contacts, turn_foot_terms=turn_foot_terms,
   ), weights)
 
 

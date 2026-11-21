@@ -39,6 +39,8 @@ class TrainCfg:
   """Provide front-foot terrain preview and shape swing clearance at upcoming risers."""
   stair_edge_clearance: bool = False
   """Add per-foot riser preview, clearance above the next tread, and uphill speed tracking."""
+  stair_contact_learning: bool = False
+  """Learn foot contacts from MuJoCo and penalize swing contact and sliding on stairs."""
   stair_warmup_iterations: int = 300
   """Refit the world model on each stair course before updating the actor."""
   gait: str = "auto"
@@ -187,6 +189,8 @@ class TrainCfg:
       raise ValueError("stair_level must be in [0, 5] and stair warmup must be nonnegative")
     if (self.stair_front_clearance or self.stair_edge_clearance) and not self.stair_level:
       raise ValueError("stair clearance options require a stair_level")
+    if self.stair_contact_learning and not self.stair_edge_clearance:
+      raise ValueError("stair_contact_learning requires stair_edge_clearance")
     if self.stair_level and (self.task != "Lite3-Velocity-Flat" or self.gait not in ("auto", "walk")):
       raise ValueError("stairs require Lite3 velocity with auto or walk gait")
     if not math.isfinite(self.actor_anchor_weight) or self.actor_anchor_weight < 0:
@@ -328,7 +332,7 @@ def expand_world_model_scan(old: dict, wm: WorldModel) -> bool:
   if w_old is None or w_old.shape[0] != w_new.shape[0] or w_new.shape[1] - w_old.shape[1] != tr.SCAN_POINTS:
     return False
   for k, v in old.items():
-    if k not in ("net.0.weight", "in_norm.mean", "in_norm.var") and sd[k].shape != v.shape:
+    if k not in ("net.0.weight", "in_norm.mean", "in_norm.var") and (k not in sd or sd[k].shape != v.shape):
       return False
   d = w_old.shape[1]
   for k, v in old.items():
@@ -399,6 +403,11 @@ class Trainer:
             command_cfg.reward_weights.stair_forward_tracking = 0.75
           else:
             command_cfg.reward_weights.stair_front_shortfall = -1.0
+        if cfg.stair_contact_learning:
+          from lite3_supermimic.locomotion.stairs import add_stair_contact_sensor
+          add_stair_contact_sensor(env_cfg)
+          command_cfg.reward_weights.stair_swing_contact = -0.9
+          command_cfg.reward_weights.stair_contact_slip = -0.35
     else:
       env_cfg.commands["target"].target.curriculum_steps = cfg.target_curriculum_iterations
     if "terrain_levels" in env_cfg.curriculum:
@@ -425,7 +434,7 @@ class Trainer:
     self.xi = self.ctx.read()
     self.enc_bias = self.env.scene["robot"].data.encoder_bias.clone()
 
-    self.wm = WorldModel(cfg.wm_hidden).to(self.dev)
+    self.wm = WorldModel(cfg.wm_hidden, predict_contacts=cfg.stair_contact_learning).to(self.dev)
     self.actor = Actor(obs_dim, cfg.actor_hidden, st.NUM_JOINTS).to(self.dev)
     self.opt_wm = torch.optim.Adam(self.wm.parameters(), lr=cfg.lr)
     self.opt_actor = torch.optim.Adam(self.actor.parameters(), lr=cfg.lr, betas=(0.9, 0.95))
@@ -433,8 +442,10 @@ class Trainer:
     from lite3_supermimic.locomotion.gait import STATE_DIM as command_dim
     from lite3_supermimic.supermimic.buffer import GEN_DIM
     self.buf = ReplayBuffer(cfg.num_envs, cfg.buffer_len, obs_dim, self.dev,
-                            gen_dim=command_dim if self.locomotion else GEN_DIM)
-    self.archive = WindowArchive(cfg.archive_size, cfg.wm_window, st.CONTEXT_DIM, self.dev)
+                            gen_dim=command_dim if self.locomotion else GEN_DIM,
+                            store_contacts=cfg.stair_contact_learning)
+    self.archive = WindowArchive(cfg.archive_size, cfg.wm_window, st.CONTEXT_DIM, self.dev,
+                                 store_contacts=cfg.stair_contact_learning)
     self.explore = torch.arange(cfg.num_envs, device=self.dev) < int(cfg.explore_frac * cfg.num_envs)
     self.ou = torch.zeros(cfg.num_envs, st.NUM_JOINTS, device=self.dev)
     self.terms = st.obs_terms(env_cfg)
@@ -513,13 +524,20 @@ class Trainer:
     if self.cfg.continue_run:
       self.start_it = int(ckpt.get("iteration", 0))
     wm_sd = self.wm.state_dict()
-    same_wm = all(
-      k in ckpt["world_model"] and ckpt["world_model"][k].shape == v.shape for k, v in wm_sd.items()
+    old_wm = ckpt["world_model"]
+    same_wm = wm_sd.keys() == old_wm.keys() and all(old_wm[k].shape == v.shape for k, v in wm_sd.items())
+    shared_wm = {k: v for k, v in wm_sd.items() if not k.startswith("contact_head.")}
+    same_dynamics = (
+      shared_wm.keys() == {k for k in old_wm if not k.startswith("contact_head.")}
+      and all(old_wm[k].shape == v.shape for k, v in shared_wm.items())
     )
     if same_wm:
       self.wm.load_state_dict(ckpt["world_model"])
       if "opt_wm" in ckpt:
         self.opt_wm.load_state_dict(ckpt["opt_wm"])
+    elif same_dynamics:
+      self.wm.load_state_dict({k: old_wm[k] for k in shared_wm}, strict=False)
+      print("world model dynamics restored; contact head and optimizer initialized for this run", flush=True)
     elif expand_world_model_scan(ckpt["world_model"], self.wm):
       print("world model: ground-scan inputs added (zero weight, same predictions)", flush=True)
     else:
@@ -587,12 +605,15 @@ class Trainer:
 
   @torch.no_grad()
   def collect(self) -> None:
+    from lite3_supermimic.locomotion.stairs import stair_contacts
+
     env, cfg = self.env, self.cfg
     for _ in range(cfg.collect_steps):
       s = st.robot_state(env, field=self.field)
       pose = st.planar_pose(env)
       gen = self.term.state.clone() if self.locomotion else pack_generator(self.term.gen)
       relief = self._relief(pose)
+      contacts = stair_contacts(env, self.term) if cfg.stair_contact_learning else None
       a = self.actor(self.obs)
       dt = env.step_dt
       # Driven envs are the last ones: MoE-CTS, then before them the expert.
@@ -621,7 +642,7 @@ class Trainer:
         self.driver.reset(done)
         self.steer.resample(done, self.term.gen.center)
       self.ou = torch.where(done.unsqueeze(-1), torch.zeros_like(self.ou), self.ou)
-      self.buf.add(s, pose, a, self.a_prev, self.obs, gen, done, relief)
+      self.buf.add(s, pose, a, self.a_prev, self.obs, gen, done, relief, contacts=contacts)
       keep = ~done
       if keep.any():
         s1 = st.robot_state(env, field=self.field)
@@ -660,18 +681,26 @@ class Trainer:
   def _gather(self, env, idx, valid) -> dict[str, torch.Tensor]:
     b, k = self.buf, self.cfg.wm_window
     e = env.unsqueeze(-1)
-    return {
+    window = {
       "s": b.s[e, idx], "pose": b.pose[e, idx], "a": b.a[e, idx[:, :k]],
       "a_prev": b.a_prev[e, idx[:, :k]], "xi": self.xi[env], "valid": valid,
       "relief": b.relief[e, idx[:, :k]],
     }
+    if b.contacts is not None:
+      window["contacts"] = b.contacts[e, idx[:, 1:]]
+    return window
 
   @staticmethod
   def _rarity(w: dict[str, torch.Tensor]) -> torch.Tensor:
     """Contact changes + flight steps + an early episode end (a fall) per window."""
     s = w["s"]
-    contact = st.feet_world_z(s.reshape(-1, st.STATE_DIM)) < 0.035
-    contact = contact.reshape(s.shape[0], -1, 4).float()
+    if "contacts" in w:
+      contact = w["contacts"].float()
+      changes = (contact[:, 1:] - contact[:, :-1]).abs().sum(-1)
+      airborne = (~w["contacts"].any(-1) & w["valid"].bool()).sum(-1)
+      ended = (w["valid"][:, -1] < 0.5).float() * 4.0
+      return (changes * w["valid"][:, 1:]).sum(-1) + airborne + ended
+    contact = (st.feet_world_z(s.reshape(-1, st.STATE_DIM)) < 0.035).reshape(s.shape[0], -1, 4).float()
     changes = (contact[:, 1:] - contact[:, :-1]).abs().sum((1, 2))
     airborne = (contact.sum(-1) == 0).float().sum(-1)
     ended = (w["valid"][:, -1] < 0.5).float() * 4.0
@@ -682,8 +711,11 @@ class Trainer:
     """Genuinely rare windows: a flight phase (all feet off for >= 2 steps), a
     hard vertical base motion (take-off / landing impact) or a fall."""
     s = w["s"]
-    feet_z = st.feet_world_z(s.reshape(-1, st.STATE_DIM)).reshape(s.shape[0], -1, 4)
-    flight = ((feet_z >= 0.035).all(-1).float().sum(-1)) >= 2
+    if "contacts" in w:
+      flight = (~w["contacts"].any(-1) & w["valid"].bool()).sum(-1) >= 2
+    else:
+      feet_z = st.feet_world_z(s.reshape(-1, st.STATE_DIM)).reshape(s.shape[0], -1, 4)
+      flight = (feet_z >= 0.035).all(-1).sum(-1) >= 2
     hard_vz = s[:, :, st.V_YAW][..., 2].abs().amax(-1) > 0.6
     fell = w["valid"][:, -1] < 0.5
     return flight | hard_vz | fell
@@ -716,7 +748,7 @@ class Trainer:
       )
       loss = self.wm.loss(
         w["s"][:, 0], w["a"], w["a_prev"], w["xi"], w["relief"].float(), w["s"][:, 1:],
-        pose_tgt, w["valid"],
+        pose_tgt, w["valid"], contact_targets=w.get("contacts"),
       )
       self.opt_wm.zero_grad(set_to_none=True)
       loss.backward()
