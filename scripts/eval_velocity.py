@@ -61,6 +61,15 @@ def main():
   if args.gait:
     gait_cfg.mode = args.gait
   cfg = velocity_play_cfg(gait_cfg, args.num_envs, args.seed)
+  step_dt = cfg.sim.mujoco.timestep * cfg.decimation
+  if args.seconds is None and args.vx_sequence is not None:
+    steps = len(args.vx_sequence) * max(1, round(args.segment_seconds / step_dt))
+  else:
+    seconds = 60 if args.seconds is None else args.seconds
+    steps = max(1, int(seconds / step_dt))
+  if args.vx_sequence is not None:
+    # A time-out reset would replace a deceleration test with another start from rest.
+    cfg.episode_length_s = max(cfg.episode_length_s, steps * step_dt + 1.0)
   env = ManagerBasedRlEnv(cfg=cfg, device="cuda:0", render_mode="rgb_array" if args.video else None)
   with ExitStack() as stack:
     stack.callback(env.close)
@@ -71,11 +80,6 @@ def main():
     actor = Actor(obs["actor"].shape[-1], tuple(ckpt["cfg"]["actor_hidden"]), 12).to(env.device)
     actor.load_state_dict(ckpt["actor"])
     actor.eval()
-    if args.seconds is None and args.vx_sequence is not None:
-      steps = len(args.vx_sequence) * evaluation.segment_steps
-    else:
-      seconds = 60 if args.seconds is None else args.seconds
-      steps = max(1, int(seconds / env.step_dt))
     if args.video:
       import mediapy
       Path(args.video).parent.mkdir(parents=True, exist_ok=True)
