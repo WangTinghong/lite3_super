@@ -5,8 +5,8 @@ import torch
 
 from lite3_supermimic.locomotion.actions import action_bounds
 from lite3_supermimic.locomotion.footfalls import summarize_footfalls, summarize_swings
-from lite3_supermimic.locomotion.gait import GAITS, foot_schedule
-from lite3_supermimic.robot.constants import HIP_X_JOINT_INDICES, LEGS
+from lite3_supermimic.locomotion.gait import GAITS, advance, foot_schedule
+from lite3_supermimic.robot.constants import HIP_X_JOINT_INDICES, JOINT_NAMES, LEGS
 from lite3_supermimic.supermimic import state as st
 
 
@@ -15,7 +15,7 @@ class VelocityEvaluation:
 
   def __init__(self, env, *, vx=None, vy=0.0, yaw_rate=0.0, hipx_target_limit=0.0,
                vx_sequence=None, segment_seconds=5.0, acceleration_steps=None, total_steps=None,
-               record_footfalls=False):
+               record_footfalls=False, turn_front_assist=False):
     self.unwrapped = env
     self.cfg, self.num_envs, self.device = env.cfg, env.num_envs, env.device
     self.term = env.command_manager.get_term("velocity")
@@ -43,6 +43,14 @@ class VelocityEvaluation:
     self.segment_metrics = [self._empty_metrics() for _ in self.vx_sequence or ()]
     self.acceleration_steps = acceleration_steps
     self.total_steps = total_steps
+    self.turn_front_assist = turn_front_assist
+    if turn_front_assist:
+      self.assist_remaining = torch.zeros(self.num_envs, 2, device=self.device, dtype=torch.long)
+      self.assist_previous_swing = torch.zeros_like(self.assist_remaining, dtype=torch.bool)
+      self.assist_actions = self.term.state.new_zeros(2, len(JOINT_NAMES))
+      self.assist_actions[0, [JOINT_NAMES.index("FL_HipY_joint"),
+                             JOINT_NAMES.index("FL_Knee_joint")]] = 1.
+      self.assist_actions[1, JOINT_NAMES.index("FR_Knee_joint")] = 1.
     self.foot_contacts = None
     if record_footfalls:
       if acceleration_steps is None:
@@ -91,6 +99,9 @@ class VelocityEvaluation:
 
   def reset(self):
     self.obs, info = self.unwrapped.reset()
+    if self.turn_front_assist:
+      self.assist_remaining.zero_()
+      self.assist_previous_swing.zero_()
     return self.obs, info
 
   def get_observations(self):
@@ -105,6 +116,21 @@ class VelocityEvaluation:
       segment %= len(self.command_cycle)
     self.term.state[:, :3] = self.command_cycle[segment]
     command = self.term.state.clone()
+    if self.turn_front_assist:
+      gait = self.term.cfg.gait
+      current = foot_schedule(command, gait)[3]
+      ahead = command
+      for _ in range(4):
+        ahead = advance(ahead, env.step_dt, gait)
+      future = foot_schedule(ahead, gait)[3]
+      swing = torch.stack((current[:, st.LEGS.index("FL")], future[:, st.LEGS.index("FR")]), -1) > .012
+      active = (command[:, 5] >= .30) & (command[:, 3:5].norm(dim=-1) < .03)
+      trigger = swing & ~self.assist_previous_swing & active[:, None]
+      self.assist_remaining = torch.where(trigger, 16, self.assist_remaining)
+      self.assist_remaining = torch.where(active[:, None], self.assist_remaining, 0)
+      action = action + (self.assist_remaining > 0).to(action.dtype) @ self.assist_actions
+      self.assist_remaining = (self.assist_remaining - 1).clamp_min(0)
+      self.assist_previous_swing = swing
     if self.action_bounds is not None:
       action = action.clamp(*self.action_bounds)
     steady = self.acceleration_steps is not None and self.step_index >= self.acceleration_steps
@@ -114,6 +140,9 @@ class VelocityEvaluation:
     self.obs, _, terminated, truncated, _ = result
     # Auto-reset states must be excluded from kinematic errors.
     keep = ~(terminated | truncated)
+    if self.turn_front_assist:
+      self.assist_remaining[~keep] = 0
+      self.assist_previous_swing[~keep] = False
     s = st.robot_state(env)
     hipx = s[:, st.Q][:, HIP_X_JOINT_INDICES]
     gait_cfg = self.term.cfg.gait

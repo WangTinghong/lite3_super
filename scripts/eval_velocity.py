@@ -36,6 +36,8 @@ def main():
   ap.add_argument("--gait", choices=("auto", *GAITS), default=None)
   ap.add_argument("--video", help="Optional MP4 of environment zero.")
   ap.add_argument("--viewer", action="store_true", help="Open a live MuJoCo window on this desktop.")
+  ap.add_argument("--turn-front-assist", action="store_true",
+                  help="Replay the tested front-leg lift offsets during a +0.35 rad/s in-place turn.")
   args = ap.parse_args()
   if args.num_envs is None:
     args.num_envs = 1 if args.viewer else 64
@@ -52,6 +54,10 @@ def main():
     ap.error("--acceleration-seconds requires a fixed --vx command and a split within the run")
   if args.footfall_output is not None and args.acceleration_seconds is None:
     ap.error("--footfall-output requires --acceleration-seconds")
+  if args.turn_front_assist and (
+      args.vx != 0 or args.vy != 0 or args.yaw_rate != .35 or args.gait != "auto"
+      or args.step_height is not None):
+    ap.error("--turn-front-assist requires --gait auto --vx 0 --vy 0 --yaw-rate 0.35 on flat ground")
   if args.step_height is not None and (
       not math.isfinite(args.step_height) or args.step_height <= 0
       or args.vx is None or args.vx <= 0 or args.vy != 0 or args.yaw_rate != 0
@@ -102,7 +108,7 @@ def main():
                                     hipx_target_limit=hipx_target_limit,
                                     vx_sequence=args.vx_sequence, segment_seconds=args.segment_seconds,
                                     acceleration_steps=acceleration_steps, total_steps=steps,
-                                    record_footfalls=record_footfalls)
+                                    record_footfalls=record_footfalls, turn_front_assist=args.turn_front_assist)
     obs, _ = evaluation.reset()
     actor = Actor(obs["actor"].shape[-1], tuple(ckpt["cfg"]["actor_hidden"]), 12).to(env.device)
     actor.load_state_dict(ckpt["actor"])
