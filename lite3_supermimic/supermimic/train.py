@@ -53,6 +53,8 @@ class TrainCfg:
   """Penalize per-axis tracking errors more strongly during 1.10–1.30 m/s straight motion."""
   bound_pair_reward: bool = False
   """Penalize left/right foot-pair mismatch and front/rear timing errors in bound."""
+  bound_pair_sync_reward: bool = False
+  """Enable the bound foot-pair synchronization penalty without the timing penalty."""
   bound_enter: float = 1.5
   bound_exit: float = 1.2
   num_envs: int = 2048
@@ -193,8 +195,9 @@ class TrainCfg:
       raise ValueError("bound straight sampling requires Lite3 velocity, auto gait and finite speeds above bound_enter")
     if self.mid_straight_reward and self.task != "Lite3-Velocity-Flat":
       raise ValueError("mid_straight_reward requires the Lite3 velocity task")
-    if self.bound_pair_reward and (self.task != "Lite3-Velocity-Flat" or self.gait not in ("auto", "bound")):
-      raise ValueError("bound_pair_reward requires Lite3 velocity with auto or bound gait")
+    if (self.bound_pair_reward or self.bound_pair_sync_reward) and (
+        self.task != "Lite3-Velocity-Flat" or self.gait not in ("auto", "bound")):
+      raise ValueError("bound pair rewards require Lite3 velocity with auto or bound gait")
     if self.task == "Lite3-Velocity-Flat":
       from lite3_supermimic.locomotion.gait import GaitCfg
       GaitCfg(mode=self.gait, bound_enter=self.bound_enter, bound_exit=self.bound_exit)
@@ -344,8 +347,9 @@ class Trainer:
         command_cfg.reward_weights.mid_straight_vx_error = -0.40
         command_cfg.reward_weights.mid_straight_vy_error = -0.35
         command_cfg.reward_weights.mid_straight_yaw_error = -0.25
-      if cfg.bound_pair_reward:
+      if cfg.bound_pair_reward or cfg.bound_pair_sync_reward:
         command_cfg.reward_weights.bound_pair_sync = -0.35
+      if cfg.bound_pair_reward:
         command_cfg.reward_weights.bound_pair_timing = -0.50
       if cfg.expert_policy:
         raise ValueError("Velocity training currently collects with its own actor; omit --expert-policy")
