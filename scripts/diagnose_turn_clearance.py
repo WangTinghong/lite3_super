@@ -105,73 +105,99 @@ def probe_actions(env, actor, model, gait, args, hipx_limit):
   low, high = action_bounds(limits.default_q, limits.action_scale, limits.soft_limits, hipx_limit or float("inf"))
   context = st.ContextReader(env).read()
   relief = context.new_zeros(env.num_envs, st.SCAN_POINTS)
-  evaluation = VelocityEvaluation(env, vx=0., yaw_rate=args.yaw_rate)
-  prefix, baseline_actions = [], []
-  horizon = 8
+  command = env.command_manager.get_term("velocity")
+  sensor = env.scene["footfall_ground_contact"]
+  contact_columns = [sensor.primary_names.index(f"{args.probe_leg}_{part}_collision")
+                     for part in ("FOOT", "SHANK")]
+  target = context.new_tensor([0., 0., args.yaw_rate])
   dt = env.step_dt
-  command = evaluation.term
 
+  def step_sim(action):
+    command.state[:, :3] = target
+    return env.step(action)
+
+  actions, states = [], []
   with validation_seed(torch.device(env.device), args.seed):
-    obs, _ = evaluation.reset()
+    obs, _ = env.reset()
     previous_height = 0.
     for step in range(round(5 / dt)):
       height = float(foot_schedule(command.state, gait)[3][0, leg])
       if step * dt >= 3. and previous_height <= .012 < height:
         break
       previous_height = height
+      states.append(st.robot_state(env))
       action = actor(obs["actor"]).clamp(low, high)
-      prefix.append(action)
-      obs, *_ = evaluation.step(action)
+      actions.append(action)
+      obs, *_ = step_sim(action)
     else:
       raise RuntimeError("No front-leg swing onset found in the probe window")
-    start_state = st.robot_state(env)
-    for _ in range(horizon):
+    onset = len(actions)
+    states.append(st.robot_state(env))
+    for _ in range(args.probe_steps):
       action = actor(obs["actor"]).clamp(low, high)
-      baseline_actions.append(action)
-      obs, *_ = evaluation.step(action)
+      actions.append(action)
+      obs, *_ = step_sim(action)
 
-  def replay(delta):
+  def replay(start, delta):
     with validation_seed(torch.device(env.device), args.seed):
-      evaluation.reset()
-      for action in prefix:
-        evaluation.step(action)
-      actual = st.robot_state(env)
-      matched = (actual - start_state).abs().amax(dim=-1) < 1e-3
-      previous = prefix[-1]
-      predicted = actual
-      start_height = st.feet_world_z(actual)[:, leg]
-      actual_rises, predicted_rises = [], []
-      for baseline in baseline_actions:
+      env.reset()
+      for action in actions[:start]:
+        step_sim(action)
+      predicted = st.robot_state(env)
+      matched = (predicted - states[start]).abs().amax(dim=-1) < 1e-3
+      previous = actions[start - 1]
+      start_height = st.feet_world_z(predicted)[:, leg]
+      actual_rises, predicted_rises, clean_air, forces = [], [], [], []
+      for baseline in actions[start:start + args.probe_steps]:
         action = (baseline + delta).clamp(low, high)
         predicted, _ = model(predicted, action, previous, context, relief)
-        _, _, terminated, truncated, _ = evaluation.step(action)
-        matched &= ~(terminated | truncated)
-        actual_rises.append(st.feet_world_z(st.robot_state(env))[:, leg] - start_height)
+        _, _, terminated, truncated, _ = step_sim(action)
+        actual = st.robot_state(env)
+        matched &= ~(terminated | truncated) & (actual[:, st.GRAV.stop - 1] < -0.866)
+        rise = st.feet_world_z(actual)[:, leg] - start_height
+        actual_rises.append(rise)
         predicted_rises.append(st.feet_world_z(predicted)[:, leg] - start_height)
+        contact = sensor.data
+        clean_air.append((rise >= .010) & ~(contact.found[:, contact_columns] > 0).any(dim=-1))
+        force_z = contact.force[:, contact_columns, 2]
+        forces.append(force_z.abs().sum(dim=-1))
         previous = action
-    return torch.stack(actual_rises), torch.stack(predicted_rises), matched
+    air = torch.stack(clean_air)
+    sustained = (air[:-2] & air[1:-1] & air[2:]).any(dim=0)
+    return (torch.stack(actual_rises).amax(dim=0), torch.stack(predicted_rises).amax(dim=0),
+            sustained, torch.stack(forces).mean(dim=0), matched)
+
+  def mean_if_valid(values):
+    return float(values.mean()) if values.numel() else None
 
   zero = context.new_zeros(12)
-  base_actual, base_predicted, base_valid = replay(zero)
   results = []
-  for hip in (0., -.15, .15):
-    for knee in (0., -.15, .15):
-      if hip == knee == 0.:
-        continue
-      delta = zero.clone()
-      delta[joints] = delta.new_tensor([hip, knee])
-      actual, predicted, valid = replay(delta)
-      valid &= base_valid
-      real_gain = actual[:, valid].amax(dim=0) - base_actual[:, valid].amax(dim=0)
-      model_gain = predicted[:, valid].amax(dim=0) - base_predicted[:, valid].amax(dim=0)
-      results.append({
-        "delta_normalized_hip_y_knee": [hip, knee],
-        "valid_envs": int(valid.sum()),
-        "mujoco_peak_rise_gain_mm": float(real_gain.mean() * 1000) if real_gain.numel() else None,
-        "model_peak_rise_gain_mm": float(model_gain.mean() * 1000) if model_gain.numel() else None,
-      })
+  for lead in args.probe_lead_steps:
+    start = onset - lead
+    base_actual, base_predicted, base_air, base_force, base_valid = replay(start, zero)
+    for scale in args.probe_scales:
+      for hip, knee in ((0, -1), (0, 1), (-1, 0), (1, 0), (-1, -1), (-1, 1), (1, -1), (1, 1)):
+        delta = zero.clone()
+        delta[joints] = delta.new_tensor([hip * scale, knee * scale])
+        actual, predicted, air, force, valid = replay(start, delta)
+        valid &= base_valid
+        results.append({
+          "lead_steps": lead,
+          "delta_normalized_hip_y_knee": [hip * scale, knee * scale],
+          "valid_envs": int(valid.sum()),
+          "baseline_sustained_lift_envs": int((base_air & valid).sum()),
+          "sustained_lift_envs": int((air & valid).sum()),
+          "mujoco_peak_rise_mm": mean_if_valid(1000 * actual[valid]),
+          "mujoco_peak_rise_gain_mm": mean_if_valid(1000 * (actual - base_actual)[valid]),
+          "model_peak_rise_gain_mm": mean_if_valid(1000 * (predicted - base_predicted)[valid]),
+          "mean_vertical_support_n": mean_if_valid(force[valid]),
+          "baseline_vertical_support_n": mean_if_valid(base_force[valid]),
+        })
+  results.sort(key=lambda row: (row["sustained_lift_envs"], row["valid_envs"],
+                               row["mujoco_peak_rise_mm"] or 0.), reverse=True)
   return {"leg": args.probe_leg, "yaw_rate_rad_s": args.yaw_rate, "seed": args.seed,
-          "start_s": len(prefix) * dt, "horizon_s": horizon * dt, "perturbations": results}
+          "swing_onset_s": onset * dt, "horizon_s": args.probe_steps * dt,
+          "sample_dt_s": dt, "perturbations": results}
 
 
 def main():
@@ -183,7 +209,14 @@ def main():
   parser.add_argument("--device", default="cuda:0")
   parser.add_argument("--probe-leg", choices=("FL", "FR"),
                       help="Replay matched actions with small HipY and knee target perturbations.")
+  parser.add_argument("--probe-scales", type=float, nargs="+", default=[.15])
+  parser.add_argument("--probe-lead-steps", type=int, nargs="+", default=[0])
+  parser.add_argument("--probe-steps", type=int, default=8)
   args = parser.parse_args()
+  if (not all(0 < scale <= 1 for scale in args.probe_scales)
+      or not all(0 <= lead <= 12 for lead in args.probe_lead_steps)
+      or not 3 <= args.probe_steps <= 50):
+    parser.error("probe scales must be in (0, 1], lead steps in [0, 12], and horizon in [3, 50]")
   if args.num_envs <= 0:
     parser.error("--num-envs must be positive")
   import lite3_supermimic.env
@@ -195,7 +228,11 @@ def main():
   if cfg["task"] != "Lite3-Velocity-Flat":
     parser.error("expected a Lite3-Velocity-Flat checkpoint")
   gait = GaitCfg(**checkpoint["gait_cfg"])
-  env_cfg = velocity_play_cfg(gait, args.num_envs, args.seed)
+  env_cfg = velocity_play_cfg(gait, args.num_envs, args.seed, record_footfalls=bool(args.probe_leg))
+  if args.probe_leg:
+    sensor = next(s for s in env_cfg.scene.sensors if s.name == "footfall_ground_contact")
+    sensor.fields = ("found", "force")
+    sensor.reduce = "netforce"
   env_cfg.episode_length_s = max(env_cfg.episode_length_s, 16.)
   env = ManagerBasedRlEnv(cfg=env_cfg, device=args.device)
   try:
