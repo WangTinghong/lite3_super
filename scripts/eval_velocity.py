@@ -18,9 +18,12 @@ def main():
   ap = argparse.ArgumentParser(description=__doc__)
   ap.add_argument("--checkpoint", required=True)
   ap.add_argument("--num-envs", type=int, help="Defaults to 1 with --viewer, otherwise 64.")
-  ap.add_argument("--seconds", type=float, default=60)
+  ap.add_argument("--seconds", type=float, help="Defaults to one custom sequence or 60 seconds.")
   ap.add_argument("--seed", type=int, help="Reuse the same seed to compare checkpoints.")
-  ap.add_argument("--vx", type=float, default=None, help="Fixed command. Omit for an acceleration/deceleration cycle.")
+  forward = ap.add_mutually_exclusive_group()
+  forward.add_argument("--vx", type=float, help="Fixed forward command in m/s.")
+  forward.add_argument("--vx-sequence", type=float, nargs="+", help="Forward commands in m/s, in playback order.")
+  ap.add_argument("--segment-seconds", type=float, default=5, help="Duration per speed command in a sequence.")
   ap.add_argument("--vy", type=float, default=0)
   ap.add_argument("--yaw-rate", type=float, default=0)
   ap.add_argument("--hipx-target-limit", type=float, help="Override the checkpoint's action limits for comparison.")
@@ -30,10 +33,12 @@ def main():
   args = ap.parse_args()
   if args.num_envs is None:
     args.num_envs = 1 if args.viewer else 64
-  if args.num_envs <= 0 or args.seconds <= 0 or not all(math.isfinite(v) for v in (args.seconds, args.vy, args.yaw_rate)):
-    ap.error("environment count and duration must be positive, commands must be finite")
-  if args.vx is not None and not math.isfinite(args.vx):
-    ap.error("--vx must be finite")
+  durations = (args.segment_seconds,) if args.seconds is None else (args.seconds, args.segment_seconds)
+  if args.num_envs <= 0 or not all(math.isfinite(d) and d > 0 for d in durations):
+    ap.error("environment count and durations must be positive and finite")
+  forward_speeds = args.vx_sequence or (() if args.vx is None else (args.vx,))
+  if not all(math.isfinite(v) for v in (*forward_speeds, args.vy, args.yaw_rate)):
+    ap.error("velocity commands must be finite")
   if args.hipx_target_limit is not None and (
       not math.isfinite(args.hipx_target_limit) or args.hipx_target_limit < 0):
     ap.error("--hipx-target-limit must be finite and nonnegative")
@@ -60,12 +65,17 @@ def main():
   with ExitStack() as stack:
     stack.callback(env.close)
     evaluation = VelocityEvaluation(env, vx=args.vx, vy=args.vy, yaw_rate=args.yaw_rate,
-                                    hipx_target_limit=hipx_target_limit)
+                                    hipx_target_limit=hipx_target_limit,
+                                    vx_sequence=args.vx_sequence, segment_seconds=args.segment_seconds)
     obs, _ = evaluation.reset()
     actor = Actor(obs["actor"].shape[-1], tuple(ckpt["cfg"]["actor_hidden"]), 12).to(env.device)
     actor.load_state_dict(ckpt["actor"])
     actor.eval()
-    steps = max(1, int(args.seconds / env.step_dt))
+    if args.seconds is None and args.vx_sequence is not None:
+      steps = len(args.vx_sequence) * evaluation.segment_steps
+    else:
+      seconds = 60 if args.seconds is None else args.seconds
+      steps = max(1, int(seconds / env.step_dt))
     if args.video:
       import mediapy
       Path(args.video).parent.mkdir(parents=True, exist_ok=True)

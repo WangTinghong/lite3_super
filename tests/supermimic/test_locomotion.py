@@ -322,3 +322,33 @@ def test_command_manager_reset_and_per_environment_timing():
   command.compute(0., env_ids=torch.tensor([0]))
   torch.testing.assert_close(command.state[1], other)
   assert command.command.shape == (2, 12)
+
+
+def test_velocity_evaluation_separates_the_initial_and_final_stop(monkeypatch):
+  from unittest.mock import Mock
+  from lite3_supermimic.locomotion.evaluation import VelocityEvaluation
+
+  term = SimpleNamespace(state=initial_state(1, 'cpu'), cfg=SimpleNamespace(gait=GaitCfg()))
+  env = SimpleNamespace(cfg=None, num_envs=1, device='cpu', step_dt=.02,
+                        command_manager=SimpleNamespace(get_term=lambda name: term), step=Mock())
+  samples = []
+
+  def step(action):
+    samples.append(term.state[0, 0].item())
+    terminated = torch.tensor([len(samples) == 4])
+    return {}, None, terminated, torch.tensor([False]), {}
+
+  env.step.side_effect = step
+  monkeypatch.setattr(st, 'robot_state', lambda env: torch.zeros(1, st.STATE_DIM))
+  evaluation = VelocityEvaluation(env, vx_sequence=[0., .5, 0.], segment_seconds=.04)
+  for _ in range(7):
+    evaluation.step(torch.zeros(1, 12))
+  assert samples == [0., 0., .5, .5, 0., 0., 0.]
+  summary = evaluation.summary()
+  segments = summary['segments']
+  assert [segment['target_vx_m_s'] for segment in segments] == [0., .5, 0.]
+  assert [segment['falls'] for segment in segments] == [0, 1, 0]
+  assert segments[1]['valid_seconds'] == pytest.approx(.02)
+  assert segments[2]['start_s'] == pytest.approx(.08)
+  assert segments[2]['end_s'] == pytest.approx(.14)
+  assert summary['stand']['falls'] == 1
