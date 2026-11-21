@@ -222,6 +222,29 @@ def test_imagined_joint_targets_obey_action_bounds_and_can_leave_saturation():
   assert (request.grad < 0).all()
 
 
+@pytest.mark.parametrize('bootstrap_weight', [0., 1.])
+def test_imagined_critic_bootstrap_stays_within_velocity_reward_bound(bootstrap_weight):
+  from lite3_supermimic.supermimic.imagine import ImagineCfg
+
+  cfg = ImagineCfg(horizon=3, actor_bootstrap_weight=bootstrap_weight, weights=RewardWeights())
+  imag = LocomotionImagination(cfg, consts(1), GaitCfg(), 5, 'cpu')
+  s = torch.zeros(1, st.STATE_DIM)
+  s[:, 0], s[:, 3] = .28, -1
+  seed = dict(s=s, pose=torch.zeros(1, 3), a_prev=torch.zeros(1, 12), obs=torch.zeros(1, 270),
+              xi=torch.zeros(1, 4), enc_bias=torch.zeros(1, 12), env=torch.arange(1), gen=initial_state(1, 'cpu'))
+  def critic(x):
+    return x[..., :1] * 0 + 1000.
+
+  objective, data = imag.rollout(
+    lambda state, *args: (state, torch.zeros(1, 3)), lambda obs: torch.zeros(1, 12), critic, seed,
+  )
+  expected = bootstrap_weight * 10 * cfg.gamma ** cfg.horizon * data['surv'][:, -1]
+  torch.testing.assert_close(data['terminal_value'], torch.tensor([1000.]))
+  torch.testing.assert_close(data['bootstrap_return'], expected)
+  torch.testing.assert_close(objective, data['step_return'] + expected)
+  assert (imag.gae_targets(critic, data) <= 10.00001).all()
+
+
 def test_locomotion_imagination_updates_actor_with_finite_gradients():
   from lite3_supermimic.supermimic.train import Actor, Critic
   from lite3_supermimic.supermimic.imagine import ImagineCfg

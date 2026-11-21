@@ -61,6 +61,7 @@ class ImagineCfg:
   horizon: int = 32
   gamma: float = 0.99
   lam: float = 0.95
+  actor_bootstrap_weight: float = 1.0
   dt: float = 0.02
   fall_angle_deg: float = 70.0
   fall_softness_deg: float = 5.0
@@ -239,6 +240,9 @@ class Imagination:
     unpack_generator(gen, seed["gen"])
     return gen.state()
 
+  def _bootstrap_values(self, values):
+    return values
+
   def rollout(self, wm, actor, critic, seed: dict, hint_weight: float = 0.0):
     """Imagine H steps from replay seeds. Returns differentiable objective and critic data."""
     cfg = self.cfg
@@ -270,9 +274,18 @@ class Imagination:
       surv = surv * (1.0 - d)
       disc *= cfg.gamma
     x_H = self.critic_input(s, pose, gst, xi)
-    v_H = critic(x_H).squeeze(-1)
-    objective = ret + disc * surv * v_H
+    if cfg.actor_bootstrap_weight:
+      v_H = critic(x_H).squeeze(-1)
+      bootstrap = disc * surv * cfg.actor_bootstrap_weight * self._bootstrap_values(v_H)
+    else:
+      with torch.no_grad():
+        v_H = critic(x_H).squeeze(-1)
+      bootstrap = torch.zeros_like(ret)
+    objective = ret + bootstrap
     return objective, {
+      "step_return": ret.detach(),
+      "terminal_value": v_H.detach(),
+      "bootstrap_return": bootstrap.detach(),
       "rewards": torch.stack(rewards, 1),  # (B, H)
       "surv": torch.stack(survs + [surv], 1),  # (B, H+1)
       "critic_in": torch.stack(crit_in + [x_H], 1),  # (B, H+1, D)
@@ -284,7 +297,7 @@ class Imagination:
     cfg = self.cfg
     r = data["rewards"].detach()
     surv = data["surv"].detach()
-    v = critic(data["critic_in"].detach()).squeeze(-1)  # (B, H+1)
+    v = self._bootstrap_values(critic(data["critic_in"].detach()).squeeze(-1))  # (B, H+1)
     H = r.shape[1]
     targets = torch.zeros_like(r)
     nxt = v[:, H]

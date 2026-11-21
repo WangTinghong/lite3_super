@@ -95,6 +95,8 @@ python scripts/eval_velocity.py --checkpoint <完整checkpoint> \
 
 侧移续训可加 `--pure-side-fraction 0.35`，将约 35% 的非站立指令换成左右等概率的纯侧移，侧向速度为 ±0.10 m/s，前向速度和偏航角速度为零。用相同种子复测两个侧移方向，重点比较 `vy_mean_m_s`、`vy_rmse_m_s` 和 `vx_mean_m_s`，并用低速起停序列复测前向跟踪。
 
+平地速度任务将 critic 自举值限制在当前奖励所允许的折扣回报上限。默认权重下，每步最高 0.1 分，长期回报最多 10 分。训练日志分别记录想象步内累计奖励 `imagined_step_return`、末端 critic 原始估值 `critic_terminal_value`，以及计入 actor 目标的 `imagined_bootstrap_return`。要排查末端估值的影响，可用 `--actor-bootstrap-weight 0`，此时 actor 仍通过世界模型优化想象步内奖励，critic 继续拟合自己的价值目标。
+
 当前未提供此任务训练完成的权重。macOS CPU 检查不能验证 CUDA 并行训练、收敛效果或真机安全运行。固定步态与自动步态的训练设置保存在检查点中，续训使用相同设置。评估可以通过 `--gait` 覆盖，但跨设置表现取决于训练覆盖。
 
 追踪任务和旧 PPO 基线的历史说明见 [迁移记录](docs/SUPERMIMIC_MIGRATION.md) 与 [DreamWaQ／AMP](docs/LEGACY_DREAMWAQ.md)。

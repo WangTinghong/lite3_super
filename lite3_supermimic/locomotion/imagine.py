@@ -24,11 +24,17 @@ class LocomotionImagination(Imagination):
     self.cfg, self.c, self.gait_cfg = cfg, consts, gait_cfg
     self.h, self.device, self.terms = history, device, OBS_TERMS
     self.hipx_target_limit = hipx_target_limit
+    self.max_return = float("inf")
+    if cfg.gamma < 1:
+      self.max_return = cfg.weights.upper_reward_rate() * cfg.dt / (1 - cfg.gamma)
     self.critic_dim = st.STATE_DIM + gait.STATE_DIM + 1 + st.CONTEXT_DIM
     self._step_fn = torch.compile(self._step, dynamic=False) if cfg.compile else self._step
 
   def _generator_state(self, seed):
     return seed["gen"]
+
+  def _bootstrap_values(self, values):
+    return values.clamp_max(self.max_return)
 
   def critic_input(self, s, pose, command, xi):
     # Sin/cos phase encoding removes the discontinuity at cycle wraparound.

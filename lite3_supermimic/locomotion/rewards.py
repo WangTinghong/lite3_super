@@ -1,6 +1,7 @@
 """Identical differentiable locomotion rewards in simulation and imagination."""
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
+import math
 import torch
 from lite3_supermimic.supermimic import state as st
 from lite3_supermimic.locomotion.gait import GaitCfg, foot_schedule
@@ -23,6 +24,15 @@ class RewardWeights:
   joint_limits: float = -2.0
   torque: float = -2e-5
   terminated: float = -200.0
+
+  def upper_reward_rate(self) -> float:
+    bounded_terms = {"track_velocity", "track_yaw", "upright", "base_height", "gait_height", "terminated"}
+    # These terms are in [0, 1]. A positive weight on any other term may
+    # make the reward unbounded, so only cap when the bound is valid.
+    positive_terms = [term for term in fields(self) if getattr(self, term.name) > 0]
+    if any(term.name not in bounded_terms for term in positive_terms):
+      return math.inf
+    return sum(getattr(self, term.name) for term in positive_terms)
 
 
 def reward_terms(s, action, previous_action, command, consts, gait: GaitCfg):

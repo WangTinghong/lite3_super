@@ -81,6 +81,8 @@ class TrainCfg:
   predicts badly (falls rise once the ramp-up completes)."""
   actor_anchor_weight: float = 0.0
   """Penalize changes to requested actions relative to the resumed velocity policy."""
+  actor_bootstrap_weight: float = 1.0
+  """Weight on the terminal critic value in the actor objective. Zero uses rollout rewards alone."""
   lr_final_frac: float = 0.03
   lr_decay_iterations: int = 30_000
   horizon: int = 32
@@ -151,6 +153,8 @@ class TrainCfg:
   def __post_init__(self):
     if not math.isfinite(self.actor_anchor_weight) or self.actor_anchor_weight < 0:
       raise ValueError("actor_anchor_weight must be finite and nonnegative")
+    if not 0 <= self.actor_bootstrap_weight <= 1:
+      raise ValueError("actor_bootstrap_weight must be in [0, 1]")
     if self.actor_anchor_weight and (self.task != "Lite3-Velocity-Flat" or not self.resume):
       raise ValueError("actor_anchor_weight requires a Lite3 velocity --resume checkpoint")
     if self.validate_straight and (self.task != "Lite3-Velocity-Flat" or not self.resume):
@@ -341,7 +345,8 @@ class Trainer:
       from lite3_supermimic.locomotion.imagine import LocomotionImagination
       command_cfg = env_cfg.commands["velocity"]
       imag_cfg = ImagineCfg(horizon=cfg.horizon, dt=self.env.step_dt, compile=cfg.compile,
-                            fall_angle_deg=60.0, weights=command_cfg.reward_weights)
+                            fall_angle_deg=60.0, weights=command_cfg.reward_weights,
+                            actor_bootstrap_weight=cfg.actor_bootstrap_weight)
       self.field = None
       self.imag = LocomotionImagination(imag_cfg, self.consts, command_cfg.gait,
                                          self.history, self.dev, cfg.hipx_target_limit)
@@ -349,7 +354,8 @@ class Trainer:
       weights = RewardWeights(**{f.name: env_cfg.rewards[f.name].weight
                                  for f in fields(RewardWeights) if f.name in env_cfg.rewards})
       imag_cfg = ImagineCfg(horizon=cfg.horizon, dt=self.env.step_dt, compile=cfg.compile,
-                            sensor_grad=cfg.sensor_grad, weights=weights)
+                            sensor_grad=cfg.sensor_grad, weights=weights,
+                            actor_bootstrap_weight=cfg.actor_bootstrap_weight)
       self.field = self.term.height_field
       self.imag = Imagination(imag_cfg, self.consts, self.term.cfg.target, self.history,
                               self.dev, self.terms, self.field)
@@ -664,6 +670,9 @@ class Trainer:
     return {
       **anchor_stats,
       "imagined_return": objective.mean().item(),
+      "imagined_step_return": data["step_return"].mean().item(),
+      "critic_terminal_value": data["terminal_value"].mean().item(),
+      "imagined_bootstrap_return": data["bootstrap_return"].mean().item(),
       "imagined_reward": data["rewards"].mean().item(),
       "imagined_survival": data["surv"][:, -1].mean().item(),
       "actor_grad_norm": float(gnorm),
