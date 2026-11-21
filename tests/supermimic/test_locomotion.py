@@ -324,6 +324,22 @@ def test_command_manager_reset_and_per_environment_timing():
   assert command.command.shape == (2, 12)
 
 
+def test_pure_side_sampling_retains_standing_and_covers_both_directions():
+  from lite3_supermimic.locomotion.command import VelocityGaitCommandCfg
+
+  env = SimpleNamespace(num_envs=256, device='cpu', scene={'robot': None},
+                        common_step_counter=7500)
+  cfg = VelocityGaitCommandCfg(resampling_time_range=(4., 8.), pure_side_fraction=1.0)
+  term = cfg.build(env)
+  with torch.random.fork_rng(devices=[]):
+    torch.manual_seed(42)
+    term.reset(torch.arange(env.num_envs))
+  targets = term.state[:, :3]
+  torch.testing.assert_close(targets[:, [0, 2]], torch.zeros(env.num_envs, 2))
+  torch.testing.assert_close(targets[:, 1].unique(), torch.tensor([-.1, 0., .1]))
+  torch.testing.assert_close(term.state[:, 3:6], torch.zeros(env.num_envs, 3))
+
+
 def test_velocity_evaluation_separates_the_initial_and_final_stop(monkeypatch):
   from unittest.mock import Mock
   from lite3_supermimic.locomotion.evaluation import VelocityEvaluation

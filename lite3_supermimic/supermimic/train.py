@@ -39,6 +39,8 @@ class TrainCfg:
   hipx_target_limit: float = 0.25
   """Maximum HipX target offset in radians. Zero restores legacy unbounded actions."""
   velocity_curriculum_iterations: int = 20_000
+  pure_side_fraction: float = 0.0
+  """Fraction of moving commands reserved for balanced +/-0.1 m/s pure side steps."""
   bound_enter: float = 1.5
   bound_exit: float = 1.2
   num_envs: int = 2048
@@ -153,6 +155,10 @@ class TrainCfg:
       raise ValueError("actor_anchor_weight requires a Lite3 velocity --resume checkpoint")
     if self.validate_straight and (self.task != "Lite3-Velocity-Flat" or not self.resume):
       raise ValueError("validate_straight requires a Lite3 velocity --resume checkpoint")
+    if not 0 <= self.pure_side_fraction <= 1:
+      raise ValueError("pure_side_fraction must be in [0, 1]")
+    if self.pure_side_fraction and self.task != "Lite3-Velocity-Flat":
+      raise ValueError("pure_side_fraction requires the Lite3 velocity task")
     if self.task == "Lite3-Velocity-Flat":
       from lite3_supermimic.locomotion.gait import GaitCfg
       GaitCfg(mode=self.gait, bound_enter=self.bound_enter, bound_exit=self.bound_exit)
@@ -289,6 +295,7 @@ class Trainer:
       command_cfg.max_forward = cfg.max_forward
       command_cfg.initial_forward = min(command_cfg.initial_forward, cfg.max_forward)
       command_cfg.curriculum_steps = cfg.velocity_curriculum_iterations
+      command_cfg.pure_side_fraction = cfg.pure_side_fraction
       if cfg.expert_policy:
         raise ValueError("Velocity training currently collects with its own actor; omit --expert-policy")
     else:

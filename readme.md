@@ -93,6 +93,8 @@ python scripts/eval_velocity.py --checkpoint <完整checkpoint> \
 
 续训时可加 `--validate-straight true --save-interval 100`。每次保存前，先用与起始权重相同的 8 个环境和固定随机种子做 20 秒的 0.5 m/s 直行检查。若跌倒次数增加，或偏航、速度误差及足端相位一致性超出容差，训练停止并保留上一个通过检查的权重。验证日志以 `straight validation` 开头，另写入 TensorBoard 的 `validation/`。
 
+侧移续训可加 `--pure-side-fraction 0.35`，将约 35% 的非站立指令换成左右等概率的纯侧移，侧向速度为 ±0.10 m/s，前向速度和偏航角速度为零。用相同种子复测两个侧移方向，重点比较 `vy_mean_m_s`、`vy_rmse_m_s` 和 `vx_mean_m_s`，并用低速起停序列复测前向跟踪。
+
 当前未提供此任务训练完成的权重。macOS CPU 检查不能验证 CUDA 并行训练、收敛效果或真机安全运行。固定步态与自动步态的训练设置保存在检查点中，续训使用相同设置。评估可以通过 `--gait` 覆盖，但跨设置表现取决于训练覆盖。
 
 追踪任务和旧 PPO 基线的历史说明见 [迁移记录](docs/SUPERMIMIC_MIGRATION.md) 与 [DreamWaQ／AMP](docs/LEGACY_DREAMWAQ.md)。
