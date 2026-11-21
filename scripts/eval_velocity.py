@@ -93,7 +93,9 @@ def main():
   record_footfalls = args.footfall_output is not None
   cfg = velocity_play_cfg(gait_cfg, args.num_envs, args.seed, record_footfalls=record_footfalls,
                           step_height=args.step_height, turn_front_assist=args.turn_front_assist,
-                          stair_level=args.stair_level or 0, front_preview=ckpt["cfg"].get("stair_front_clearance", False))
+                          stair_level=args.stair_level or 0,
+                          front_preview=ckpt["cfg"].get("stair_front_clearance", False),
+                          edge_preview=ckpt["cfg"].get("stair_edge_clearance", False))
   step_dt = cfg.sim.mujoco.timestep * cfg.decimation
   if args.seconds is None and args.vx_sequence is not None:
     steps = len(args.vx_sequence) * max(1, round(args.segment_seconds / step_dt))

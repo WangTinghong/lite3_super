@@ -28,6 +28,7 @@ def locomotion_reward(env):
   state = st.robot_state(env) if field is None else st.robot_state(env, field=field)
   height = None
   rise = None
+  edge = heading = None
   if field is not None:
     from lite3_supermimic.locomotion.stairs import local_foot_heights
     height = local_foot_heights(state, st.planar_pose(env), field)
@@ -35,11 +36,14 @@ def locomotion_reward(env):
       from lite3_supermimic.locomotion.stairs import front_rise_ahead
       front = st.limb_positions_w(term.robot)["feet"][:, :2, :2]
       rise = front_rise_ahead(front, term.robot.data.heading_w, field)
+    if weights.stair_edge_shortfall:
+      edge = field.edge_clearance(st.limb_positions_w(term.robot)["feet"])
+      heading = term.robot.data.heading_w
   return weighted_reward(reward_terms(
     state, env.action_manager.action, env.action_manager.prev_action,
     term.state, term.robot_consts, term.cfg.gait, foot_velocity_xy=foot_velocity_xy,
     front_clearance_enabled=bool(weights.turn_front_clearance),
-    foot_height=height, front_rise=rise,
+    foot_height=height, front_rise=rise, stair_edge=edge, stair_heading=heading,
   ), weights)
 
 

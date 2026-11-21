@@ -37,6 +37,8 @@ class TrainCfg:
   """Optional uphill stair course, levels 1–5 correspond to 2, 4, 6, 8 and 10 cm."""
   stair_front_clearance: bool = False
   """Provide front-foot terrain preview and shape swing clearance at upcoming risers."""
+  stair_edge_clearance: bool = False
+  """Add per-foot riser preview, clearance above the next tread, and uphill speed tracking."""
   stair_warmup_iterations: int = 300
   """Refit the world model on each stair course before updating the actor."""
   gait: str = "auto"
@@ -181,8 +183,8 @@ class TrainCfg:
   def __post_init__(self):
     if not 0 <= self.stair_level <= 5 or self.stair_warmup_iterations < 0:
       raise ValueError("stair_level must be in [0, 5] and stair warmup must be nonnegative")
-    if self.stair_front_clearance and not self.stair_level:
-      raise ValueError("stair_front_clearance requires a stair_level")
+    if (self.stair_front_clearance or self.stair_edge_clearance) and not self.stair_level:
+      raise ValueError("stair clearance options require a stair_level")
     if self.stair_level and (self.task != "Lite3-Velocity-Flat" or self.gait not in ("auto", "walk")):
       raise ValueError("stairs require Lite3 velocity with auto or walk gait")
     if not math.isfinite(self.actor_anchor_weight) or self.actor_anchor_weight < 0:
@@ -387,10 +389,14 @@ class Trainer:
         from lite3_supermimic.locomotion.stairs import configure_stair_course
         configure_stair_course(env_cfg, cfg.stair_level, training=True)
         command_cfg.reward_weights.gait_height = 0.5
-        if cfg.stair_front_clearance:
+        if cfg.stair_front_clearance or cfg.stair_edge_clearance:
           from lite3_supermimic.locomotion.stairs import add_front_rise_observation
-          add_front_rise_observation(env_cfg)
-          command_cfg.reward_weights.stair_front_shortfall = -1.0
+          add_front_rise_observation(env_cfg, edge_preview=cfg.stair_edge_clearance)
+          if cfg.stair_edge_clearance:
+            command_cfg.reward_weights.stair_edge_shortfall = -1.5
+            command_cfg.reward_weights.stair_forward_tracking = 0.75
+          else:
+            command_cfg.reward_weights.stair_front_shortfall = -1.0
     else:
       env_cfg.commands["target"].target.curriculum_steps = cfg.target_curriculum_iterations
     if "terrain_levels" in env_cfg.curriculum:
@@ -439,7 +445,8 @@ class Trainer:
       self.field = self.term.height_field
       self.imag = LocomotionImagination(imag_cfg, self.consts, command_cfg.gait,
                                          self.history, self.dev, cfg.hipx_target_limit, field=self.field,
-                                         front_preview=cfg.stair_front_clearance)
+                                         front_preview=cfg.stair_front_clearance,
+                                         edge_preview=cfg.stair_edge_clearance)
     else:
       weights = RewardWeights(**{f.name: env_cfg.rewards[f.name].weight
                                  for f in fields(RewardWeights) if f.name in env_cfg.rewards})
@@ -817,6 +824,7 @@ class Trainer:
     validation = StraightValidation(
       self.term.cfg.gait, self.dev, self.cfg.hipx_target_limit,
       mid_straight=self.cfg.validate_mid_straight, front_preview=self.cfg.stair_front_clearance,
+      edge_preview=self.cfg.stair_edge_clearance,
     )
     try:
       self._run(validation)

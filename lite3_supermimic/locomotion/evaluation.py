@@ -1,11 +1,13 @@
 """Shared simulator playback and metrics for Lite3 velocity policies."""
 import math
+from statistics import median
 
 import torch
 
 from lite3_supermimic.locomotion.actions import action_bounds
 from lite3_supermimic.locomotion.footfalls import summarize_footfalls, summarize_swings
 from lite3_supermimic.locomotion.gait import GAITS, foot_schedule
+from lite3_supermimic.locomotion.stairs import HALF_WIDTH, riser_crossing_clearance
 from lite3_supermimic.robot.constants import HIP_X_JOINT_INDICES, JOINT_NAMES, LEGS
 from lite3_supermimic.supermimic import state as st
 
@@ -56,6 +58,9 @@ class VelocityEvaluation:
       self.front_over_first = torch.zeros((self.num_envs, 2), dtype=torch.bool, device=self.device)
       self.stair_hold = torch.zeros_like(self.stair_valid, dtype=torch.long)
       self.stair_max_x = self.term.state.new_full((self.num_envs,), -math.inf)
+      self.stair_edges = self.term.state.new_tensor(self.stair_field.edges)
+      self.edge_clearance = self.term.state.new_full((self.num_envs, len(LEGS), self.stair_edges.numel()),
+                                                     math.nan)
     self.action_bounds = None
     if hipx_target_limit:
       consts = st.robot_consts(env)
@@ -135,6 +140,8 @@ class VelocityEvaluation:
 
   def reset(self):
     self.obs, info = self.unwrapped.reset()
+    if self.stair_field is not None:
+      self.previous_stair_feet = st.limb_positions_w(self.term.robot)["feet"]
     if self.turn_front_assist:
       self.assist.reset(slice(None))
     return self.obs, info
@@ -172,22 +179,27 @@ class VelocityEvaluation:
     self.obs, _, terminated, truncated, _ = result
     # Auto-reset states must be excluded from kinematic errors.
     keep = ~(terminated | truncated)
+    foot_height = None
     if self.stair_field is not None:
-      from lite3_supermimic.locomotion.stairs import HALF_WIDTH, RISERS
-
       robot = env.scene["robot"]
       feet = st.limb_positions_w(robot)["feet"]
+      foot_height = feet[..., 2] - self.stair_field.sample(feet[..., :2]) - st.FOOT_RADIUS
       self.stair_valid &= keep
+      crossed, clearance = riser_crossing_clearance(
+        self.previous_stair_feet, feet, self.stair_edges, self.stair_field.height)
+      first_crossing = crossed & self.stair_valid[:, None, None] & self.edge_clearance.isnan()
+      self.edge_clearance = torch.where(first_crossing, clearance, self.edge_clearance)
+      self.previous_stair_feet = feet
       front = feet[:, :2]
-      cleared = ((front[..., 0] > RISERS[0] + st.FOOT_RADIUS)
+      cleared = ((front[..., 0] > self.stair_edges[0] + st.FOOT_RADIUS)
                  & (front[..., 1].abs() < HALF_WIDTH - st.FOOT_RADIUS)
                  & (front[..., 2] - st.FOOT_RADIUS >= self.stair_field.height))
       self.front_over_first |= self.stair_valid[:, None] & cleared
       self.stair_max_x = torch.where(self.stair_valid,
         torch.maximum(self.stair_max_x, robot.data.root_link_pos_w[:, 0]), self.stair_max_x)
-      on_top = ((feet[..., 0] > RISERS[-1] + .05)
+      on_top = ((feet[..., 0] > self.stair_edges[-1] + .05)
                 & (feet[..., 1].abs() < HALF_WIDTH)
-                & (feet[..., 2] > self.stair_field.height * len(RISERS))).all(dim=-1)
+                & (feet[..., 2] > self.stair_field.height * self.stair_edges.numel())).all(dim=-1)
       self.stair_hold = torch.where(on_top & self.stair_valid, self.stair_hold + 1, 0)
       self.stair_success |= self.stair_hold * env.step_dt >= .3
     if self.turn_front_assist:
@@ -196,7 +208,9 @@ class VelocityEvaluation:
     hipx = s[:, st.Q][:, HIP_X_JOINT_INDICES]
     gait_cfg = self.term.cfg.gait
     _, _, stance, _ = foot_schedule(command, gait_cfg)
-    actual_contact = st.feet_world_z(s) - st.FOOT_RADIUS < 0.02
+    if foot_height is None:
+      foot_height = st.feet_world_z(s) - st.FOOT_RADIUS
+    actual_contact = foot_height < 0.02
     agree = (actual_contact == (stance > 0.5)).float().mean(-1)
     moving = command[:, 3:5].norm(dim=-1) + command[:, 5].abs() > gait_cfg.stand_speed
     selected = torch.where(moving, command[:, 10].long() + 1, 0)
@@ -268,6 +282,22 @@ class VelocityEvaluation:
       })
     return result
 
+  def _stair_crossings(self):
+    # One sample per foot, riser and environment, from the first attempt.
+    edges = []
+    for index, x in enumerate(self.stair_field.edges):
+      samples = self.edge_clearance[:, :, index].T.tolist()
+      legs = {}
+      for leg, values in zip(st.LEGS, samples):
+        clearance_mm = [value * 1000 for value in values if math.isfinite(value)]
+        legs[leg] = {
+          "crossed": len(clearance_mm),
+          "median_clearance_mm": median(clearance_mm) if clearance_mm else None,
+          "crossed_with_10mm_clearance": sum(value >= 10 for value in clearance_mm),
+        }
+      edges.append({"riser": index + 1, "x_m": x, "feet": legs})
+    return edges
+
   def summary(self):
     result = {name: self._summary(values) for name, values in self.metrics.items() if values["samples"]}
     if self.turn_front_assist:
@@ -276,10 +306,11 @@ class VelocityEvaluation:
       result["stairs"] = {
         "step_height_m": self.stair_field.height,
         "attempts": self.num_envs,
-        "front_feet_cleared_first_riser": dict(zip(LEGS[:2], self.front_over_first.sum(0).tolist())),
+        "front_feet_cleared_first_riser": dict(zip(st.LEGS[:2], self.front_over_first.sum(0).tolist())),
         "both_front_feet_cleared_first_riser": int(self.front_over_first.all(-1).sum()),
         "completed_ascent": int(self.stair_success.sum()),
         "completed_ascent_without_reset": int((self.stair_success & self.stair_valid).sum()),
+        "first_crossing_by_riser": self._stair_crossings(),
         "max_forward_x_m_by_env": [value if math.isfinite(value) else None
                                    for value in self.stair_max_x.tolist()],
       }
@@ -321,7 +352,7 @@ class VelocityEvaluation:
 
 
 def velocity_play_cfg(gait_cfg, num_envs, seed=None, *, record_footfalls=False, step_height=None,
-                      turn_front_assist=False, stair_level=0, front_preview=False):
+                      turn_front_assist=False, stair_level=0, front_preview=False, edge_preview=False):
   from mjlab.tasks.registry import load_env_cfg
 
   cfg = load_env_cfg("Lite3-Velocity-Flat", play=True)
@@ -331,9 +362,9 @@ def velocity_play_cfg(gait_cfg, num_envs, seed=None, *, record_footfalls=False, 
   cmd_cfg.gait = gait_cfg
   cmd_cfg.resampling_time_range = (1e9, 1e9)
   cmd_cfg.standing_fraction = 1.0
-  if front_preview:
+  if front_preview or edge_preview:
     from lite3_supermimic.locomotion.stairs import add_front_rise_observation
-    add_front_rise_observation(cfg, step_height)
+    add_front_rise_observation(cfg, step_height, edge_preview=edge_preview)
   if stair_level:
     from lite3_supermimic.locomotion.stairs import configure_stair_course
 

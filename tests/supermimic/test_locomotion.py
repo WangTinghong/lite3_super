@@ -612,7 +612,7 @@ def test_upcoming_riser_shapes_only_the_front_foot_in_swing():
                              torch.zeros_like(rise))
   command = initial_state(2, 'cpu')
   command[:, 3] = .3
-  command[:, 6] = .875  # Left-front mid-swing in walk.
+  command[:, 6] = .875  # First foot's mid-swing in walk.
   state = torch.zeros(2, st.STATE_DIM)
   action = torch.zeros(2, 12)
   heights = torch.zeros(2, 4, requires_grad=True)
@@ -630,3 +630,44 @@ def test_upcoming_riser_shapes_only_the_front_foot_in_swing():
   assert cost()[0] == 0
   command[:, 3] = 0.
   assert cost().count_nonzero() == 0
+
+
+def test_stair_edge_reward_targets_swing_clearance_and_course_velocity():
+  from lite3_supermimic.locomotion.stairs import StairField
+
+  cfg = GaitCfg()
+  field = StairField(1)
+  # The last foot is in mid-swing. The first is near the edge in stance.
+  command = initial_state(1, 'cpu')
+  command[:, 3] = .3
+  command[:, 6] = .625
+  feet = torch.tensor([[[.62, .1, .025], [.20, -.1, .025],
+                        [.20, .1, .025], [.62, -.1, .040]]], requires_grad=True)
+  state = torch.zeros(1, st.STATE_DIM)
+  state[:, st.V_YAW][:, 0] = .3
+  action = torch.zeros(1, 12)
+
+  def terms(heading):
+    return reward_terms(state, action, action, command, consts(1), cfg,
+                        stair_edge=field.edge_clearance(feet), stair_heading=torch.tensor([heading]))
+
+  straight = terms(0.)
+  assert straight["stair_edge_shortfall"].item() == pytest.approx(.6)
+  gradient, = torch.autograd.grad(straight["stair_edge_shortfall"].sum(), feet)
+  assert gradient[0, 3, 2] < 0 and gradient.count_nonzero() == 1
+  assert straight["stair_forward_tracking"].item() == pytest.approx(1.)
+  assert terms(torch.pi / 2)["stair_forward_tracking"].item() < .1
+  with torch.no_grad():
+    feet[0, 3, 2] = .071
+  assert terms(0.)["stair_edge_shortfall"].item() == 0.
+
+
+def test_riser_crossing_clearance_interpolates_height_and_requires_uphill_motion():
+  from lite3_supermimic.locomotion.stairs import riser_crossing_clearance
+
+  edges = torch.tensor([.65, 1.05])
+  before = torch.tensor([[[.64, .1, .08], [.67, .1, .08], [.64, 1.24, .08], [1.04, .1, .04]]])
+  after = torch.tensor([[[.66, .1, .06], [.63, .1, .08], [.66, 1.24, .08], [1.06, .1, .05]]])
+  crossed, clearance = riser_crossing_clearance(before, after, edges, .02)
+  assert crossed.nonzero().tolist() == [[0, 0, 0], [0, 3, 1]]
+  torch.testing.assert_close(clearance[crossed], torch.tensor([.028, -.017]), atol=1e-6, rtol=0.)

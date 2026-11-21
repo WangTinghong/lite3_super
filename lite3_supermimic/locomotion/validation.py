@@ -86,7 +86,7 @@ class StraightValidation:
   """Compare fixed straight commands on repeatable initial conditions."""
 
   def __init__(self, gait_cfg, device, hipx_target_limit, *, num_envs=8, seconds=20.0,
-               seed=42, mid_straight=False, front_preview=False):
+               seed=42, mid_straight=False, front_preview=False, edge_preview=False):
     from mjlab.envs import ManagerBasedRlEnv
 
     self.device = torch.device(device)
@@ -95,7 +95,7 @@ class StraightValidation:
     self.checks = ((0.5, seed),)
     if mid_straight:
       self.checks += tuple((vx, mid_seed) for vx in (1.10, 1.30) for mid_seed in (42, 43))
-    cfg = velocity_play_cfg(gait_cfg, num_envs, front_preview=front_preview)
+    cfg = velocity_play_cfg(gait_cfg, num_envs, front_preview=front_preview, edge_preview=edge_preview)
     if mid_straight:
       cfg.episode_length_s = max(cfg.episode_length_s, 16.0)
     with validation_seed(self.device, seed):

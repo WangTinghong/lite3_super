@@ -19,6 +19,8 @@ class RewardWeights:
   base_height: float = 0.5
   gait_height: float = 1.0
   stair_front_shortfall: float = 0.0
+  stair_edge_shortfall: float = 0.0
+  stair_forward_tracking: float = 0.0
   bound_pair_sync: float = 0.0
   bound_pair_timing: float = 0.0
   turn_contact_slip: float = 0.0
@@ -38,7 +40,7 @@ class RewardWeights:
     bounded_terms = {"track_velocity", "track_yaw", "upright", "base_height", "gait_height", "terminated",
                      "mid_straight_vx_error", "mid_straight_vy_error", "mid_straight_yaw_error",
                      "bound_pair_sync", "bound_pair_timing", "turn_contact_slip", "turn_swing_clearance",
-                     "turn_front_clearance"}
+                     "turn_front_clearance", "stair_forward_tracking"}
     # These terms are in [0, 1]. A positive weight on any other term may
     # make the reward unbounded, so only cap when the bound is valid.
     positive_terms = [term for term in fields(self) if getattr(self, term.name) > 0]
@@ -60,7 +62,8 @@ def bound_pair_errors(height, stance):
 
 
 def reward_terms(s, action, previous_action, command, consts, gait: GaitCfg, *,
-                 foot_velocity_xy=None, front_clearance_enabled=False, foot_height=None, front_rise=None):
+                 foot_velocity_xy=None, front_clearance_enabled=False, foot_height=None,
+                 front_rise=None, stair_edge=None, stair_heading=None):
   target_velocity = command[:, :3]
   velocity = command[:, 3:6]
   planar_error = s[:, st.V_YAW][:, :2] - velocity[:, :2]
@@ -72,7 +75,7 @@ def reward_terms(s, action, previous_action, command, consts, gait: GaitCfg, *,
   # Allow the initial acceleration, then ramp in the extra cost up to 1.10 m/s.
   speed_ramp = ((velocity[:, 0] - 0.90) / 0.20).clamp(0.0, 1.0)
   mid_straight = speed_ramp * (mid_speed_target & straight_target & straight_command & trot)
-  _, _, stance, swing_height = foot_schedule(command, gait)
+  phase, duty, stance, swing_height = foot_schedule(command, gait)
   height = st.feet_world_z(s) - st.FOOT_RADIUS if foot_height is None else foot_height
   bound_weight = (command[:, 10] == 2) * command[:, 9].square()
   pair_sync, pair_timing = bound_pair_errors(height, stance)
@@ -89,9 +92,9 @@ def reward_terms(s, action, previous_action, command, consts, gait: GaitCfg, *,
     turn_clearance = turn * (clearance_shortfall / 0.045).square().mean(-1)
   if front_clearance_enabled:
     # In the model the shank capsule reaches 3 mm below the foot sphere.
-    front_rise = height[:, :2] - 0.003
+    front_height = height[:, :2] - 0.003
     front_target = swing_height[:, :2]
-    front_shortfall = (front_target.clamp(max=0.035) - front_rise).clamp_min(0.)
+    front_shortfall = (front_target.clamp(max=0.035) - front_height).clamp_min(0.)
     front_cost = -torch.expm1(-(front_shortfall / 0.035).square())
     front_clearance = turn * (front_cost * (front_target > 0.012)).mean(-1)
   stair_cost = torch.zeros_like(yaw_error)
@@ -99,12 +102,24 @@ def reward_terms(s, action, previous_action, command, consts, gait: GaitCfg, *,
     # A swing near a riser should clear its tread by 2 cm at mid-swing.
     # Detach the terrain cue so reducing the deficit rewards lifting the foot.
     rise = front_rise.detach()
-    arc = swing_height[:, :2] / max(gait.swing_height, 1e-6)
+    arc = swing_height[:, :2] / gait.swing_height
     deficit = ((rise + .02) * arc - height[:, :2]).clamp_min(0.)
     stair_cost = (arc * (rise / .02).clamp(max=1.) * deficit / .04).sum(-1)
   # Stance feet stay on the floor, swing feet follow the gait's clearance arc.
   height_error = (height - swing_height).square()
   moving = (velocity[:, :2].norm(dim=-1) + velocity[:, 2].abs()) > gait.stand_speed
+  edge_cost = forward_tracking = torch.zeros_like(yaw_error)
+  if stair_edge is not None:
+    proximity, clearance = stair_edge
+    progress = ((phase - duty) / (1. - duty)).clamp(0., 1.)
+    # Require clearance through the middle of swing and taper toward touchdown.
+    swing = (progress / .25).clamp(max=1.) * ((1. - progress) / .20).clamp(max=1.)
+    deficit = (.025 - clearance).clamp_min(0.) / .05
+    forward = moving & (velocity[:, 0] > gait.stand_speed)
+    edge_cost = forward * (swing * proximity * deficit).sum(-1)
+    vx, vy = s[:, st.V_YAW][:, :2].unbind(-1)
+    course_vx = vx * stair_heading.cos() - vy * stair_heading.sin()
+    forward_tracking = forward * torch.exp(-((course_vx - velocity[:, 0]) / .18).square())
   joint_offset = s[:, st.Q]
   hipx_excess = (joint_offset[:, HIP_X_JOINT_INDICES].abs() - 0.1).clamp_min(0)
   # Leave room for balancing corrections, side steps, turns and bound.
@@ -124,6 +139,8 @@ def reward_terms(s, action, previous_action, command, consts, gait: GaitCfg, *,
     "base_height": torch.exp(-(s[:, 0] - 0.28).square() / 0.0025),
     "gait_height": (torch.exp(-height_error / 0.0009) * (0.5 + 0.5 * stance)).mean(-1),
     "stair_front_shortfall": stair_cost,
+    "stair_edge_shortfall": edge_cost,
+    "stair_forward_tracking": forward_tracking,
     "bound_pair_sync": bound_weight * pair_sync,
     "bound_pair_timing": bound_weight * pair_timing,
     "turn_contact_slip": turn_slip,

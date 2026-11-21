@@ -92,8 +92,11 @@ def obs_terms(env_cfg) -> tuple[tuple[str, int], ...]:
   names = list(env_cfg.observations["actor"].terms)
   if "velocity" in env_cfg.commands:
     from lite3_supermimic.locomotion.imagine import OBS_TERMS as velocity_terms
+    from lite3_supermimic.locomotion.stairs import EDGE_PROXIMITY_TERM
     if "front_rise" in names:
       velocity_terms += (("front_rise", 2),)
+    if EDGE_PROXIMITY_TERM[0] in names:
+      velocity_terms += (EDGE_PROXIMITY_TERM,)
     if names != [name for name, _ in velocity_terms]:
       raise ValueError(f"Unexpected velocity observation layout: {names}")
     return velocity_terms

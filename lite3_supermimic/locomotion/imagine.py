@@ -9,7 +9,7 @@ from lite3_supermimic.supermimic.imagine import Imagination
 from lite3_supermimic.locomotion import gait
 from lite3_supermimic.locomotion.actions import action_bounds
 from lite3_supermimic.locomotion.rewards import reward_terms, weighted_reward
-from lite3_supermimic.locomotion.stairs import front_rise_ahead, local_foot_heights
+from lite3_supermimic.locomotion.stairs import EDGE_PROXIMITY_TERM, front_rise_ahead, local_foot_heights
 from lite3_supermimic.target import terrain as tr
 
 OBS_TERMS = st.OBS_TERMS[:-1] + (("velocity_gait", gait.OBS_DIM),)
@@ -22,12 +22,16 @@ def obs_frame(s, action, command, encoder_bias, gait_cfg, noise=False):
 
 
 class LocomotionImagination(Imagination):
-  def __init__(self, cfg, consts, gait_cfg, history, device, hipx_target_limit=0.0, field=None, front_preview=False):
+  def __init__(self, cfg, consts, gait_cfg, history, device, hipx_target_limit=0.0,
+               field=None, front_preview=False, edge_preview=False):
     self.cfg, self.c, self.gait_cfg = cfg, consts, gait_cfg
     self.h, self.device, self.terms = history, device, OBS_TERMS
-    self.front_preview = front_preview
-    if front_preview:
+    self.front_preview = front_preview or edge_preview
+    self.edge_preview = edge_preview
+    if self.front_preview:
       self.terms += (("front_rise", 2),)
+    if edge_preview:
+      self.terms += (EDGE_PROXIMITY_TERM,)
     self.hipx_target_limit = hipx_target_limit
     self.field = field
     self.max_return = float("inf")
@@ -72,12 +76,17 @@ class LocomotionImagination(Imagination):
       previous_feet = st.limb_points_world(s, pose)["feet"][..., :2]
       next_feet = st.limb_points_world(s_next, pose_next)["feet"][..., :2]
       foot_velocity_xy = (next_feet - previous_feet) / dt.reshape(-1, 1, 1).clamp_min(1e-6)
-    rise = None
+    rise = edge = None
     if self.front_preview:
-      front = st.limb_points_world(s_next, pose_next)["feet"][:, :2, :2]
-      rise = front_rise_ahead(front, pose_next[:, 2], self.field)
+      feet = st.limb_points_world(s_next, pose_next)["feet"]
+      rise = front_rise_ahead(feet[:, :2, :2], pose_next[:, 2], self.field)
+      if self.edge_preview:
+        world_height = tr.ground(pose_next[:, :2], self.field)
+        feet_world = torch.cat((feet[..., :2], feet[..., 2:3] + world_height[:, None, None]), dim=-1)
+        edge = self.field.edge_clearance(feet_world)
     terms = reward_terms(s_next, action, a_prev, command, constants, self.gait_cfg,
                          foot_velocity_xy=foot_velocity_xy, front_rise=rise,
+                         stair_edge=edge, stair_heading=pose_next[:, 2],
                          front_clearance_enabled=bool(self.cfg.weights.turn_front_clearance),
                          foot_height=local_foot_heights(s_next, pose_next, self.field)
                          if self.field is not None else None)
@@ -91,5 +100,7 @@ class LocomotionImagination(Imagination):
     frame = obs_frame(s_next, action, command, enc_bias, self.gait_cfg, noise=True)
     if self.front_preview:
       frame["front_rise"] = rise / .02
+    if self.edge_preview:
+      frame[EDGE_PROXIMITY_TERM[0]] = edge[0]
     hist = st.push_history(hist, frame, self.h, self.terms)
     return s_next, pose_next, action, hist, command, reward, death, crit_in
