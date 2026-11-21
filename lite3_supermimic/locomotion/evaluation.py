@@ -215,7 +215,7 @@ class VelocityEvaluation:
     return result
 
 
-def velocity_play_cfg(gait_cfg, num_envs, seed=None, *, record_footfalls=False):
+def velocity_play_cfg(gait_cfg, num_envs, seed=None, *, record_footfalls=False, step_height=None):
   from mjlab.tasks.registry import load_env_cfg
 
   cfg = load_env_cfg("Lite3-Velocity-Flat", play=True)
@@ -225,6 +225,24 @@ def velocity_play_cfg(gait_cfg, num_envs, seed=None, *, record_footfalls=False):
   cmd_cfg.gait = gait_cfg
   cmd_cfg.resampling_time_range = (1e9, 1e9)
   cmd_cfg.standing_fraction = 1.0
+  if step_height is not None:
+    import mujoco
+    from mjlab.entity import EntityCfg
+
+    def step_spec():
+      spec = mujoco.MjSpec()
+      # The front edge is 0.75 m ahead, with a long landing after the riser.
+      spec.worldbody.add_geom(
+        name="platform", type=mujoco.mjtGeom.mjGEOM_BOX,
+        pos=(4.75, 0., step_height / 2), size=(4., 1.25, step_height / 2),
+        rgba=(0.36, 0.49, 0.59, 1.), friction=(1., 0.005, 0.0001),
+      )
+      return spec
+
+    cfg.scene.entities["test_step"] = EntityCfg(spec_fn=step_spec)
+    pose_range = cfg.events["reset_base"].params["pose_range"]
+    pose_range.update(x=(0., 0.), y=(0., 0.), yaw=(0., 0.))
+    cfg.events.pop("push_robot", None)
   if record_footfalls:
     from mjlab.sensor import ContactMatch, ContactSensorCfg
 
