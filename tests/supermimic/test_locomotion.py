@@ -204,6 +204,42 @@ def test_footfall_summary_distinguishes_bound_and_trot_without_a_reference_clock
     assert stats['events_by_env'][0]['FL'] == {'touchdown_s': [3.20], 'liftoff_s': [3.08, 3.24]}
 
 
+def test_front_clearance_penalty_excludes_hind_feet_and_straight_motion():
+  command = initial_state(4, 'cpu')
+  command[:, 2] = command[:, 5] = torch.tensor([.35, -.35, .35, .35])
+  command[3, 0] = command[3, 3] = .35
+  command[:, 6] = .875
+  height = torch.tensor([[0., 0., 0., 0.], [0., 0., .08, .08],
+                         [.08, .08, 0., 0.], [0., 0., 0., 0.]], requires_grad=True)
+  state = torch.zeros(4, st.STATE_DIM)
+  state[:, st.FEET.start + 2:st.FEET.stop:3] = height + st.FOOT_RADIUS
+  action = torch.zeros(4, 12)
+  cost = reward_terms(state, action, action, command, consts(4), GaitCfg(),
+                      front_clearance_enabled=True)['turn_front_clearance']
+  assert cost[0] == cost[1] > cost[2] == cost[3] == 0
+  cost.sum().backward()
+  assert height.grad[:2, :2].abs().sum() > 0
+  assert torch.count_nonzero(height.grad[:, 2:]) == 0
+
+
+def test_swing_report_distinguishes_short_contact_breaks_from_sustained_lift():
+  from lite3_supermimic.locomotion.footfalls import summarize_swings
+
+  contacts = torch.ones(8, 1, 4, dtype=torch.bool)
+  contacts[1, 0, 0] = False
+  contacts[1:5, 0, 2] = False
+  contacts[6:, 0, 0] = False  # No touchdown before the end of the window.
+  foot_z = torch.zeros(8, 1, 4)
+  foot_z[1, 0, 0] = .002
+  foot_z[2:4, 0, 2] = .035
+  summary = summarize_swings(contacts, foot_z, .02)
+  assert summary['FL']['complete_swings'] == summary['FL']['one_sample_swings'] == 1
+  assert summary['FL']['median_peak_rise_m'] == pytest.approx(.002)
+  assert summary['HL']['median_air_time_s'] == pytest.approx(.08)
+  assert summary['HL']['median_peak_rise_m'] == pytest.approx(.035)
+  assert summary['FR']['median_peak_rise_m'] is None
+
+
 def test_hipx_reward_penalizes_both_sides_and_relaxes_during_maneuvers():
   from lite3_supermimic.robot.constants import HIP_X_JOINT_INDICES
 

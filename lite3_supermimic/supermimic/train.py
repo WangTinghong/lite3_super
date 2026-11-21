@@ -45,6 +45,8 @@ class TrainCfg:
   """Fraction of moving commands reserved for in-place turns at 0.25–0.45 rad/s in either direction."""
   turn_foot_reward: bool = False
   """Penalize stance-foot slip and swing clearance shortfall during in-place turns."""
+  turn_front_clearance: bool = False
+  """Add an in-place turning penalty for front legs that miss swing clearance."""
   fast_straight_fraction: float = 0.0
   """Fraction of moving commands reserved for pure forward motion in the fast band."""
   fast_straight_min: float = 0.9
@@ -202,7 +204,8 @@ class TrainCfg:
     if not (0 <= self.pure_turn_fraction <= 1 - (
         self.pure_side_fraction + self.fast_straight_fraction + self.bound_straight_fraction)):
       raise ValueError("pure_turn_fraction must be nonnegative and fit in the remaining moving commands")
-    if (self.pure_turn_fraction or self.turn_foot_reward) and self.task != "Lite3-Velocity-Flat":
+    if (self.pure_turn_fraction or self.turn_foot_reward or self.turn_front_clearance) and (
+        self.task != "Lite3-Velocity-Flat"):
       raise ValueError("pure turn sampling and turn foot rewards require the Lite3 velocity task")
     if (self.bound_pair_reward or self.bound_pair_sync_reward) and (
         self.task != "Lite3-Velocity-Flat" or self.gait not in ("auto", "bound")):
@@ -364,6 +367,8 @@ class Trainer:
       if cfg.turn_foot_reward:
         command_cfg.reward_weights.turn_contact_slip = -0.45
         command_cfg.reward_weights.turn_swing_clearance = -0.35
+      if cfg.turn_front_clearance:
+        command_cfg.reward_weights.turn_front_clearance = -0.60
       if cfg.expert_policy:
         raise ValueError("Velocity training currently collects with its own actor; omit --expert-policy")
     else:

@@ -1,7 +1,36 @@
 """Phase-independent footfall diagnostics from measured ground contacts."""
+from statistics import median
+
 import torch
 
 from lite3_supermimic.robot.constants import LEGS
+
+
+def summarize_swings(contacts, foot_z, dt):
+  """Measure complete airborne intervals relative to the preceding stance height."""
+  starts = contacts[:-1] & ~contacts[1:]
+  ends = ~contacts[:-1] & contacts[1:]
+  result = {}
+  for leg_index, leg in enumerate(LEGS):
+    durations, peaks = [], []
+    for env in range(contacts.shape[1]):
+      lifts = starts[:, env, leg_index].nonzero().flatten().tolist()
+      lands = ends[:, env, leg_index].nonzero().flatten().tolist()
+      if not lifts:
+        continue
+      if lands and lands[0] < lifts[0]:
+        lands = lands[1:]
+      for lift, land in zip(lifts, lands):
+        height = foot_z[lift:land + 1, env, leg_index]
+        durations.append((land - lift) * dt)
+        peaks.append(float(height.max() - height[0]))
+    result[leg] = {
+      "complete_swings": len(peaks),
+      "one_sample_swings": sum(duration <= dt for duration in durations),
+      "median_air_time_s": median(durations) if durations else None,
+      "median_peak_rise_m": median(peaks) if peaks else None,
+    }
+  return result
 
 
 def summarize_footfalls(contacts, dt, start_s):

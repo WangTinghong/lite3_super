@@ -4,7 +4,7 @@ import math
 import torch
 
 from lite3_supermimic.locomotion.actions import action_bounds
-from lite3_supermimic.locomotion.footfalls import summarize_footfalls
+from lite3_supermimic.locomotion.footfalls import summarize_footfalls, summarize_swings
 from lite3_supermimic.locomotion.gait import GAITS, foot_schedule
 from lite3_supermimic.robot.constants import HIP_X_JOINT_INDICES, LEGS
 from lite3_supermimic.supermimic import state as st
@@ -138,7 +138,7 @@ class VelocityEvaluation:
           found = self.contact_sensor.data.found[:, self.contact_order]
           self.foot_contacts.append((found > 0).reshape(self.num_envs, len(LEGS), 2).any(dim=-1))
           feet = st.limb_positions_w(env.scene["robot"])["feet"]
-          self.foot_positions.append(feet[:, self.foot_site_order, :2])
+          self.foot_positions.append(feet[:, self.foot_site_order])
     if self.writer and self.step_index % self.video_stride == 0:
       self.writer.add_image(env.render())
     self.step_index += 1
@@ -161,13 +161,14 @@ class VelocityEvaluation:
       result.update(summarize_footfalls(contacts, dt, start_s))
       feet = torch.stack(self.foot_positions, dim=0)[:, keep].cpu()
       stance = contacts[:-1] & contacts[1:]
-      speed = (feet[1:] - feet[:-1]).norm(dim=-1) / dt
+      speed = (feet[1:, ..., :2] - feet[:-1, ..., :2]).norm(dim=-1) / dt
       totals = torch.where(stance, speed, 0.).sum(dim=(0, 1))
       counts = stance.sum(dim=(0, 1))
       result["stance_foot_speed_m_s_by_leg"] = {
         leg: float(total / count) if count else None
         for leg, total, count in zip(LEGS, totals, counts)
       }
+      result["swing_by_leg"] = summarize_swings(contacts, feet[..., 2], dt)
     return result
 
   def _summary(self, values):

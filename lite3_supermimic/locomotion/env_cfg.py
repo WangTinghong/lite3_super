@@ -27,6 +27,7 @@ def locomotion_reward(env):
   return weighted_reward(reward_terms(
     st.robot_state(env), env.action_manager.action, env.action_manager.prev_action,
     term.state, term.robot_consts, term.cfg.gait, foot_velocity_xy=foot_velocity_xy,
+    front_clearance_enabled=bool(weights.turn_front_clearance),
   ), weights)
 
 
