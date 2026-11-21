@@ -42,7 +42,9 @@ class VelocityEvaluation:
 
   def _empty_metrics(self):
     return {"samples": 0, "velocity_squared_error": 0., "yaw_squared_error": 0.,
-            "falls": 0, "foot_phase_agreement": 0., "vx_sum": 0., "command_vx_sum": 0.,
+            "vx_squared_error": 0., "vy_squared_error": 0., "falls": 0,
+            "foot_phase_agreement": 0., "vx_sum": 0., "command_vx_sum": 0.,
+            "vy_sum": 0., "command_vy_sum": 0.,
             "hipx_sum": self.term.state.new_zeros(len(LEGS)),
             "hipx_squared_sum": self.term.state.new_zeros(len(LEGS))}
 
@@ -50,11 +52,20 @@ class VelocityEvaluation:
   def _accumulate(values, valid, fell, state, command, agree, hipx):
     values["samples"] += int(valid.sum())
     values["falls"] += int(fell.sum())
-    values["velocity_squared_error"] += float((state[valid, 4:6] - command[valid, 3:5]).square().sum())
+    velocity = state[valid, st.V_YAW][:, :2]
+    desired_velocity = command[valid, 3:5]
+    vx_error, vy_error = (velocity - desired_velocity).square().sum(dim=0).tolist()
+    values["vx_squared_error"] += vx_error
+    values["vy_squared_error"] += vy_error
+    values["velocity_squared_error"] += vx_error + vy_error
     values["yaw_squared_error"] += float((state[valid, 9] - command[valid, 5]).square().sum())
     values["foot_phase_agreement"] += float(agree[valid].sum())
-    values["vx_sum"] += float(state[valid, st.V_YAW.start].sum())
-    values["command_vx_sum"] += float(command[valid, 3].sum())
+    vx, vy = velocity.sum(dim=0).tolist()
+    desired_vx, desired_vy = desired_velocity.sum(dim=0).tolist()
+    values["vx_sum"] += vx
+    values["vy_sum"] += vy
+    values["command_vx_sum"] += desired_vx
+    values["command_vy_sum"] += desired_vy
     valid_hipx = hipx[valid]
     values["hipx_sum"] += valid_hipx.sum(dim=0)
     values["hipx_squared_sum"] += valid_hipx.square().sum(dim=0)
@@ -108,9 +119,13 @@ class VelocityEvaluation:
     if n:
       result.update({
         "velocity_rmse_m_s": math.sqrt(values["velocity_squared_error"] / n),
+        "vx_rmse_m_s": math.sqrt(values["vx_squared_error"] / n),
+        "vy_rmse_m_s": math.sqrt(values["vy_squared_error"] / n),
         "yaw_rmse_rad_s": math.sqrt(values["yaw_squared_error"] / n),
         "vx_mean_m_s": values["vx_sum"] / n,
+        "vy_mean_m_s": values["vy_sum"] / n,
         "command_vx_mean_m_s": values["command_vx_sum"] / n,
+        "command_vy_mean_m_s": values["command_vy_sum"] / n,
         "foot_phase_agreement": values["foot_phase_agreement"] / n,
         "hipx_mean_deg": dict(zip(LEGS, torch.rad2deg(values["hipx_sum"] / n).tolist())),
         "hipx_rms_deg": dict(zip(LEGS, torch.rad2deg((values["hipx_squared_sum"] / n).sqrt()).tolist())),

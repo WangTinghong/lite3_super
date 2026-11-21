@@ -352,3 +352,26 @@ def test_velocity_evaluation_separates_the_initial_and_final_stop(monkeypatch):
   assert segments[2]['start_s'] == pytest.approx(.08)
   assert segments[2]['end_s'] == pytest.approx(.14)
   assert summary['stand']['falls'] == 1
+
+
+def test_side_step_metrics_preserve_direction_and_split_tracking_error(monkeypatch):
+  from lite3_supermimic.locomotion.evaluation import VelocityEvaluation
+
+  term = SimpleNamespace(state=initial_state(1, 'cpu'), cfg=SimpleNamespace(gait=GaitCfg()))
+  term.state[0, 4] = -.1
+  done = torch.tensor([False])
+  env = SimpleNamespace(cfg=None, num_envs=1, device='cpu', step_dt=.02,
+                        command_manager=SimpleNamespace(get_term=lambda name: term),
+                        step=lambda action: ({}, None, done, done, {}))
+  state = torch.zeros(1, st.STATE_DIM)
+  state[0, st.V_YAW] = torch.tensor([.03, -.08, 0.])
+  monkeypatch.setattr(st, 'robot_state', lambda env: state)
+  evaluation = VelocityEvaluation(env, vx=0., vy=-.1)
+  evaluation.step(torch.zeros(1, 12))
+  walk = evaluation.summary()['walk']
+  assert walk['vx_mean_m_s'] == pytest.approx(.03)
+  assert walk['vy_mean_m_s'] == pytest.approx(-.08)
+  assert walk['command_vy_mean_m_s'] == pytest.approx(-.1)
+  assert walk['vx_rmse_m_s'] == pytest.approx(.03)
+  assert walk['vy_rmse_m_s'] == pytest.approx(.02)
+  assert walk['velocity_rmse_m_s'] ** 2 == pytest.approx(.0013)
