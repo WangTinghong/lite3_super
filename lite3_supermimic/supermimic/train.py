@@ -35,6 +35,8 @@ class TrainCfg:
   task: str = "Lite3-Velocity-Flat"
   stair_level: int = 0
   """Optional uphill stair course, levels 1–5 correspond to 2, 4, 6, 8 and 10 cm."""
+  stair_front_clearance: bool = False
+  """Provide front-foot terrain preview and shape swing clearance at upcoming risers."""
   stair_warmup_iterations: int = 300
   """Refit the world model on each stair course before updating the actor."""
   gait: str = "auto"
@@ -179,6 +181,8 @@ class TrainCfg:
   def __post_init__(self):
     if not 0 <= self.stair_level <= 5 or self.stair_warmup_iterations < 0:
       raise ValueError("stair_level must be in [0, 5] and stair warmup must be nonnegative")
+    if self.stair_front_clearance and not self.stair_level:
+      raise ValueError("stair_front_clearance requires a stair_level")
     if self.stair_level and (self.task != "Lite3-Velocity-Flat" or self.gait not in ("auto", "walk")):
       raise ValueError("stairs require Lite3 velocity with auto or walk gait")
     if not math.isfinite(self.actor_anchor_weight) or self.actor_anchor_weight < 0:
@@ -383,6 +387,10 @@ class Trainer:
         from lite3_supermimic.locomotion.stairs import configure_stair_course
         configure_stair_course(env_cfg, cfg.stair_level, training=True)
         command_cfg.reward_weights.gait_height = 0.5
+        if cfg.stair_front_clearance:
+          from lite3_supermimic.locomotion.stairs import add_front_rise_observation
+          add_front_rise_observation(env_cfg)
+          command_cfg.reward_weights.stair_front_shortfall = -1.0
     else:
       env_cfg.commands["target"].target.curriculum_steps = cfg.target_curriculum_iterations
     if "terrain_levels" in env_cfg.curriculum:
@@ -430,7 +438,8 @@ class Trainer:
                             actor_bootstrap_weight=cfg.actor_bootstrap_weight)
       self.field = self.term.height_field
       self.imag = LocomotionImagination(imag_cfg, self.consts, command_cfg.gait,
-                                         self.history, self.dev, cfg.hipx_target_limit, field=self.field)
+                                         self.history, self.dev, cfg.hipx_target_limit, field=self.field,
+                                         front_preview=cfg.stair_front_clearance)
     else:
       weights = RewardWeights(**{f.name: env_cfg.rewards[f.name].weight
                                  for f in fields(RewardWeights) if f.name in env_cfg.rewards})
@@ -536,7 +545,10 @@ class Trainer:
     if self.cfg.actor_anchor_weight:
       self.actor_anchor = deepcopy(self.actor).requires_grad_(False).eval()
       if ckpt.get("actor_anchor") is not None:
-        self.actor_anchor.load_state_dict(ckpt["actor_anchor"])
+        if old_obs_dim == new_obs_dim:
+          self.actor_anchor.load_state_dict(ckpt["actor_anchor"])
+        else:
+          expand_actor_new_terms(ckpt["actor_anchor"], self.actor_anchor, old_terms, self.terms, self.history)
       print("anchoring actor actions to the reference checkpoint; freezing actor observation statistics", flush=True)
     critic_sd = self.critic.state_dict()
     same_critic = all(
@@ -804,7 +816,7 @@ class Trainer:
 
     validation = StraightValidation(
       self.term.cfg.gait, self.dev, self.cfg.hipx_target_limit,
-      mid_straight=self.cfg.validate_mid_straight,
+      mid_straight=self.cfg.validate_mid_straight, front_preview=self.cfg.stair_front_clearance,
     )
     try:
       self._run(validation)

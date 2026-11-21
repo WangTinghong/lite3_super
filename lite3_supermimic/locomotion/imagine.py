@@ -9,7 +9,7 @@ from lite3_supermimic.supermimic.imagine import Imagination
 from lite3_supermimic.locomotion import gait
 from lite3_supermimic.locomotion.actions import action_bounds
 from lite3_supermimic.locomotion.rewards import reward_terms, weighted_reward
-from lite3_supermimic.locomotion.stairs import local_foot_heights
+from lite3_supermimic.locomotion.stairs import front_rise_ahead, local_foot_heights
 from lite3_supermimic.target import terrain as tr
 
 OBS_TERMS = st.OBS_TERMS[:-1] + (("velocity_gait", gait.OBS_DIM),)
@@ -22,9 +22,12 @@ def obs_frame(s, action, command, encoder_bias, gait_cfg, noise=False):
 
 
 class LocomotionImagination(Imagination):
-  def __init__(self, cfg, consts, gait_cfg, history, device, hipx_target_limit=0.0, field=None):
+  def __init__(self, cfg, consts, gait_cfg, history, device, hipx_target_limit=0.0, field=None, front_preview=False):
     self.cfg, self.c, self.gait_cfg = cfg, consts, gait_cfg
     self.h, self.device, self.terms = history, device, OBS_TERMS
+    self.front_preview = front_preview
+    if front_preview:
+      self.terms += (("front_rise", 2),)
     self.hipx_target_limit = hipx_target_limit
     self.field = field
     self.max_return = float("inf")
@@ -69,8 +72,12 @@ class LocomotionImagination(Imagination):
       previous_feet = st.limb_points_world(s, pose)["feet"][..., :2]
       next_feet = st.limb_points_world(s_next, pose_next)["feet"][..., :2]
       foot_velocity_xy = (next_feet - previous_feet) / dt.reshape(-1, 1, 1).clamp_min(1e-6)
+    rise = None
+    if self.front_preview:
+      front = st.limb_points_world(s_next, pose_next)["feet"][:, :2, :2]
+      rise = front_rise_ahead(front, pose_next[:, 2], self.field)
     terms = reward_terms(s_next, action, a_prev, command, constants, self.gait_cfg,
-                         foot_velocity_xy=foot_velocity_xy,
+                         foot_velocity_xy=foot_velocity_xy, front_rise=rise,
                          front_clearance_enabled=bool(self.cfg.weights.turn_front_clearance),
                          foot_height=local_foot_heights(s_next, pose_next, self.field)
                          if self.field is not None else None)
@@ -82,5 +89,7 @@ class LocomotionImagination(Imagination):
               - 0.05 * excess) * self.cfg.dt
     command = gait.advance(command, self.cfg.dt, self.gait_cfg)
     frame = obs_frame(s_next, action, command, enc_bias, self.gait_cfg, noise=True)
+    if self.front_preview:
+      frame["front_rise"] = rise / .02
     hist = st.push_history(hist, frame, self.h, self.terms)
     return s_next, pose_next, action, hist, command, reward, death, crit_in

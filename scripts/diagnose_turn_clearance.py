@@ -228,7 +228,8 @@ def main():
   if cfg["task"] != "Lite3-Velocity-Flat":
     parser.error("expected a Lite3-Velocity-Flat checkpoint")
   gait = GaitCfg(**checkpoint["gait_cfg"])
-  env_cfg = velocity_play_cfg(gait, args.num_envs, args.seed, record_footfalls=bool(args.probe_leg))
+  env_cfg = velocity_play_cfg(gait, args.num_envs, args.seed, record_footfalls=bool(args.probe_leg),
+                              front_preview=cfg.get("stair_front_clearance", False))
   if args.probe_leg:
     sensor = next(s for s in env_cfg.scene.sensors if s.name == "footfall_ground_contact")
     sensor.fields = ("found", "force")

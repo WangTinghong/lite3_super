@@ -53,6 +53,7 @@ class VelocityEvaluation:
     if self.stair_field is not None:
       self.stair_valid = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
       self.stair_success = torch.zeros_like(self.stair_valid)
+      self.front_over_first = torch.zeros((self.num_envs, 2), dtype=torch.bool, device=self.device)
       self.stair_hold = torch.zeros_like(self.stair_valid, dtype=torch.long)
       self.stair_max_x = self.term.state.new_full((self.num_envs,), -math.inf)
     self.action_bounds = None
@@ -177,6 +178,11 @@ class VelocityEvaluation:
       robot = env.scene["robot"]
       feet = st.limb_positions_w(robot)["feet"]
       self.stair_valid &= keep
+      front = feet[:, :2]
+      cleared = ((front[..., 0] > RISERS[0] + st.FOOT_RADIUS)
+                 & (front[..., 1].abs() < HALF_WIDTH - st.FOOT_RADIUS)
+                 & (front[..., 2] - st.FOOT_RADIUS >= self.stair_field.height))
+      self.front_over_first |= self.stair_valid[:, None] & cleared
       self.stair_max_x = torch.where(self.stair_valid,
         torch.maximum(self.stair_max_x, robot.data.root_link_pos_w[:, 0]), self.stair_max_x)
       on_top = ((feet[..., 0] > RISERS[-1] + .05)
@@ -270,6 +276,8 @@ class VelocityEvaluation:
       result["stairs"] = {
         "step_height_m": self.stair_field.height,
         "attempts": self.num_envs,
+        "front_feet_cleared_first_riser": dict(zip(LEGS[:2], self.front_over_first.sum(0).tolist())),
+        "both_front_feet_cleared_first_riser": int(self.front_over_first.all(-1).sum()),
         "completed_ascent": int(self.stair_success.sum()),
         "completed_ascent_without_reset": int((self.stair_success & self.stair_valid).sum()),
         "max_forward_x_m_by_env": [value if math.isfinite(value) else None
@@ -313,7 +321,7 @@ class VelocityEvaluation:
 
 
 def velocity_play_cfg(gait_cfg, num_envs, seed=None, *, record_footfalls=False, step_height=None,
-                      turn_front_assist=False, stair_level=0):
+                      turn_front_assist=False, stair_level=0, front_preview=False):
   from mjlab.tasks.registry import load_env_cfg
 
   cfg = load_env_cfg("Lite3-Velocity-Flat", play=True)
@@ -323,6 +331,9 @@ def velocity_play_cfg(gait_cfg, num_envs, seed=None, *, record_footfalls=False, 
   cmd_cfg.gait = gait_cfg
   cmd_cfg.resampling_time_range = (1e9, 1e9)
   cmd_cfg.standing_fraction = 1.0
+  if front_preview:
+    from lite3_supermimic.locomotion.stairs import add_front_rise_observation
+    add_front_rise_observation(cfg, step_height)
   if stair_level:
     from lite3_supermimic.locomotion.stairs import configure_stair_course
 

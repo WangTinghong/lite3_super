@@ -599,3 +599,34 @@ def test_side_step_metrics_preserve_direction_and_split_tracking_error(monkeypat
   assert walk['vx_rmse_m_s'] == pytest.approx(.03)
   assert walk['vy_rmse_m_s'] == pytest.approx(.02)
   assert walk['velocity_rmse_m_s'] ** 2 == pytest.approx(.0013)
+
+
+def test_upcoming_riser_shapes_only_the_front_foot_in_swing():
+  from lite3_supermimic.locomotion.stairs import StairField, front_rise_ahead
+
+  cfg = GaitCfg()
+  xy = torch.tensor([[[.58, .1], [.48, -.1]], [[.68, .1], [.52, -.1]]])
+  rise = front_rise_ahead(xy, torch.zeros(2), StairField(1))
+  torch.testing.assert_close(rise, torch.tensor([[.02, 0.], [0., 0.]]), atol=4e-3, rtol=0.)
+  torch.testing.assert_close(front_rise_ahead(xy, torch.full((2,), torch.pi), StairField(1)),
+                             torch.zeros_like(rise))
+  command = initial_state(2, 'cpu')
+  command[:, 3] = .3
+  command[:, 6] = .875  # Left-front mid-swing in walk.
+  state = torch.zeros(2, st.STATE_DIM)
+  action = torch.zeros(2, 12)
+  heights = torch.zeros(2, 4, requires_grad=True)
+
+  def cost():
+    return reward_terms(state, action, action, command, consts(2), cfg,
+                        foot_height=heights, front_rise=rise)["stair_front_shortfall"]
+
+  penalty = cost()
+  assert penalty[0] > .9
+  gradient, = torch.autograd.grad(penalty[0], heights)
+  assert gradient[0, 0] < 0 and gradient.count_nonzero() == 1
+  with torch.no_grad():
+    heights[0, 0] = .041
+  assert cost()[0] == 0
+  command[:, 3] = 0.
+  assert cost().count_nonzero() == 0

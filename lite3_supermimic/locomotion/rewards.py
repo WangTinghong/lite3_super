@@ -18,6 +18,7 @@ class RewardWeights:
   upright: float = 0.5
   base_height: float = 0.5
   gait_height: float = 1.0
+  stair_front_shortfall: float = 0.0
   bound_pair_sync: float = 0.0
   bound_pair_timing: float = 0.0
   turn_contact_slip: float = 0.0
@@ -59,7 +60,7 @@ def bound_pair_errors(height, stance):
 
 
 def reward_terms(s, action, previous_action, command, consts, gait: GaitCfg, *,
-                 foot_velocity_xy=None, front_clearance_enabled=False, foot_height=None):
+                 foot_velocity_xy=None, front_clearance_enabled=False, foot_height=None, front_rise=None):
   target_velocity = command[:, :3]
   velocity = command[:, 3:6]
   planar_error = s[:, st.V_YAW][:, :2] - velocity[:, :2]
@@ -93,6 +94,14 @@ def reward_terms(s, action, previous_action, command, consts, gait: GaitCfg, *,
     front_shortfall = (front_target.clamp(max=0.035) - front_rise).clamp_min(0.)
     front_cost = -torch.expm1(-(front_shortfall / 0.035).square())
     front_clearance = turn * (front_cost * (front_target > 0.012)).mean(-1)
+  stair_cost = torch.zeros_like(yaw_error)
+  if front_rise is not None:
+    # A swing near a riser should clear its tread by 2 cm at mid-swing.
+    # Detach the terrain cue so reducing the deficit rewards lifting the foot.
+    rise = front_rise.detach()
+    arc = swing_height[:, :2] / max(gait.swing_height, 1e-6)
+    deficit = ((rise + .02) * arc - height[:, :2]).clamp_min(0.)
+    stair_cost = (arc * (rise / .02).clamp(max=1.) * deficit / .04).sum(-1)
   # Stance feet stay on the floor, swing feet follow the gait's clearance arc.
   height_error = (height - swing_height).square()
   moving = (velocity[:, :2].norm(dim=-1) + velocity[:, 2].abs()) > gait.stand_speed
@@ -114,6 +123,7 @@ def reward_terms(s, action, previous_action, command, consts, gait: GaitCfg, *,
     "upright": torch.exp(-s[:, st.GRAV][:, :2].square().sum(-1) / 0.16),
     "base_height": torch.exp(-(s[:, 0] - 0.28).square() / 0.0025),
     "gait_height": (torch.exp(-height_error / 0.0009) * (0.5 + 0.5 * stance)).mean(-1),
+    "stair_front_shortfall": stair_cost,
     "bound_pair_sync": bound_weight * pair_sync,
     "bound_pair_timing": bound_weight * pair_timing,
     "turn_contact_slip": turn_slip,
