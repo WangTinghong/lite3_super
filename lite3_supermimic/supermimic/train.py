@@ -172,9 +172,11 @@ class TrainCfg:
   log_interval: int = 50
   save_interval: int = 1000
   validate_straight: bool = False
-  """Stop fine-tuning if a saved candidate regresses in a fixed MuJoCo straight walk."""
+  """Save only candidates that pass the fixed MuJoCo straight-walk checks."""
   validate_mid_straight: bool = False
   """Add 1.10 and 1.30 m/s steady-state straight checks at seeds 42 and 43."""
+  stop_on_straight_regression: bool = True
+  """End the run on a rejected checkpoint. Disable to continue training after rejection."""
   seed: int = 0
   run_name: str = "supermimic"
   log_root: str = "logs/lite3_supermimic"
@@ -903,8 +905,13 @@ class Trainer:
                   f" | {'PASS' if passed else 'FAIL'}", flush=True)
             all_passed &= passed
           if not all_passed:
-            print(f"stopping fine-tuning; retained checkpoint: {self.last_ckpt or cfg.resume}", flush=True)
-            return
+            retained = self.last_ckpt or cfg.resume
+            if cfg.stop_on_straight_regression:
+              print(f"stopping fine-tuning; retained checkpoint: {retained}", flush=True)
+              return
+            print(f"straight validation rejected iteration {it}; continuing training; "
+                  f"retained checkpoint: {retained}", flush=True)
+            continue
         if self.collapse_strikes == 0:
           self.last_ckpt = self.save(it)
           print(f"saved {self.last_ckpt}", flush=True)

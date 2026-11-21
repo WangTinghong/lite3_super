@@ -399,14 +399,16 @@ def test_locomotion_imagination_updates_actor_with_finite_gradients():
   assert torch.isfinite(imag.gae_targets(critic, data)).all()
 
 
-@pytest.mark.parametrize('validate', [False, True, 'mid_straight'])
+@pytest.mark.parametrize('validate', [False, True, 'mid_straight', 'continue_after_regression'])
 def test_training_loop_saves_only_validated_candidates_when_enabled(tmp_path, validate, capsys):
   from collections import defaultdict
   from unittest.mock import Mock
   from lite3_supermimic.locomotion.validation import MidStraightMetrics, StraightMetrics
   from lite3_supermimic.supermimic.train import Trainer, TrainCfg
   trainer = Trainer.__new__(Trainer)
-  trainer.cfg = TrainCfg(iterations=2, warmup_iterations=0, log_interval=1, save_interval=1)
+  keep_training = validate == 'continue_after_regression'
+  trainer.cfg = TrainCfg(iterations=3 if keep_training else 2, warmup_iterations=0,
+                         log_interval=1, save_interval=1, stop_on_straight_regression=not keep_training)
   trainer.locomotion = True
   trainer.buf = SimpleNamespace(size=20)
   trainer.term = SimpleNamespace(state=initial_state(1, 'cpu'))
@@ -439,11 +441,16 @@ def test_training_loop_saves_only_validated_candidates_when_enabled(tmp_path, va
       drifted = MidStraightMetrics(.058, .08, .81, 0, 1000, .048, .032, .030, 20.)
       validator.checks += ((1.3, 43),)
       validator.evaluate.side_effect = [reference, straight, accepted, straight, accepted, drifted]
+    elif keep_training:
+      validator.evaluate.side_effect = [reference, accepted, regressed, accepted]
     else:
       validator.evaluate.side_effect = [reference, accepted, regressed]
     trainer._run(validator)
-    assert saved == [1]
-    assert 'FAIL' in capsys.readouterr().out
+    assert saved == ([1, 3] if keep_training else [1])
+    assert trainer.last_ckpt == tmp_path / f'model_{saved[-1]}.pt'
+    output = capsys.readouterr().out
+    assert 'FAIL' in output
+    assert ('continuing training' in output) == keep_training
   else:
     trainer.run()
     assert saved == [1, 2]
