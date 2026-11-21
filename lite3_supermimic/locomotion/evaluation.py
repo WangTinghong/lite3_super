@@ -13,7 +13,7 @@ class VelocityEvaluation:
   """Share command playback and metrics between the batch loop and mjlab viewer."""
 
   def __init__(self, env, *, vx=None, vy=0.0, yaw_rate=0.0, hipx_target_limit=0.0,
-               vx_sequence=None, segment_seconds=5.0):
+               vx_sequence=None, segment_seconds=5.0, acceleration_steps=None, total_steps=None):
     self.unwrapped = env
     self.cfg, self.num_envs, self.device = env.cfg, env.num_envs, env.device
     self.term = env.command_manager.get_term("velocity")
@@ -39,6 +39,12 @@ class VelocityEvaluation:
     self.step_index = 0
     self.metrics = {name: self._empty_metrics() for name in ("stand", *GAITS)}
     self.segment_metrics = [self._empty_metrics() for _ in self.vx_sequence or ()]
+    self.acceleration_steps = acceleration_steps
+    self.total_steps = total_steps
+    if acceleration_steps is not None:
+      self.window_metrics = {name: self._empty_metrics() for name in ("acceleration", "steady_state")}
+      self.heading_change = self.term.state.new_zeros(self.num_envs)
+      self.heading_valid = torch.ones_like(self.heading_change, dtype=torch.bool)
 
   def _empty_metrics(self):
     return {"samples": 0, "velocity_squared_error": 0., "yaw_squared_error": 0.,
@@ -88,6 +94,9 @@ class VelocityEvaluation:
     command = self.term.state.clone()
     if self.action_bounds is not None:
       action = action.clamp(*self.action_bounds)
+    steady = self.acceleration_steps is not None and self.step_index >= self.acceleration_steps
+    if steady:
+      heading_before = st.planar_pose(env)[:, 2]
     result = env.step(action)
     self.obs, _, terminated, truncated, _ = result
     # Auto-reset states must be excluded from kinematic errors.
@@ -105,6 +114,13 @@ class VelocityEvaluation:
       self._accumulate(values, chosen & keep, terminated & chosen, s, command, agree, hipx)
     if self.segment_metrics:
       self._accumulate(self.segment_metrics[segment], keep, terminated, s, command, agree, hipx)
+    if self.acceleration_steps is not None:
+      window = "steady_state" if steady else "acceleration"
+      self._accumulate(self.window_metrics[window], keep, terminated, s, command, agree, hipx)
+      if steady:
+        delta = st.planar_pose(env)[:, 2] - heading_before
+        self.heading_valid &= keep & torch.isfinite(delta)
+        self.heading_change += torch.where(self.heading_valid, torch.atan2(delta.sin(), delta.cos()), 0.)
     if self.writer and self.step_index % self.video_stride == 0:
       self.writer.add_image(env.render())
     self.step_index += 1
@@ -147,6 +163,27 @@ class VelocityEvaluation:
         segments.append({"target_vx_m_s": speed, "start_s": start * dt, "end_s": stop * dt,
                          **self._summary(values)})
       result["segments"] = segments
+    if self.acceleration_steps is not None:
+      dt = self.unwrapped.step_dt
+      split = self.acceleration_steps
+      acceleration = self._summary(self.window_metrics["acceleration"])
+      steady = self._summary(self.window_metrics["steady_state"])
+      complete = self.step_index == self.total_steps
+      valid = (self.heading_valid & complete).tolist()
+      heading = [value if keep else None
+                 for value, keep in zip(torch.rad2deg(self.heading_change).tolist(), valid)]
+      measured = [value for value in heading if value is not None]
+      steady.update({
+        "complete_heading_envs": len(measured),
+        "heading_change_deg_by_env": heading,
+        "heading_signed_mean_deg": sum(measured) / len(measured) if measured else None,
+        "heading_abs_mean_deg": sum(map(abs, measured)) / len(measured) if measured else None,
+      })
+      result["windows"] = {
+        "complete": complete,
+        "acceleration": {"start_s": 0., "end_s": min(split, self.step_index) * dt, **acceleration},
+        "steady_state": {"start_s": split * dt, "end_s": max(split, self.step_index) * dt, **steady},
+      }
     return result
 
 
