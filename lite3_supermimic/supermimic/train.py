@@ -42,7 +42,9 @@ class TrainCfg:
   pure_side_fraction: float = 0.0
   """Fraction of moving commands reserved for balanced +/-0.1 m/s pure side steps."""
   fast_straight_fraction: float = 0.0
-  """Fraction of moving commands reserved for straight 0.9–1.1 m/s forward motion."""
+  """Fraction of moving commands reserved for pure forward motion in the fast band."""
+  fast_straight_min: float = 0.9
+  fast_straight_max: float = 1.1
   bound_enter: float = 1.5
   bound_exit: float = 1.2
   num_envs: int = 2048
@@ -178,6 +180,8 @@ class TrainCfg:
         raise ValueError("hipx_target_limit must be finite and nonnegative")
       if self.velocity_curriculum_iterations <= 0:
         raise ValueError("velocity_curriculum_iterations must be positive")
+      if not 0 < self.fast_straight_min <= self.fast_straight_max < math.inf:
+        raise ValueError("fast straight speeds must satisfy 0 < min <= max and be finite")
     positive = ("num_envs", "buffer_len", "iterations", "collect_steps", "wm_window",
                 "wm_batch", "wm_updates", "imag_batch", "horizon", "critic_epochs",
                 "critic_minibatches", "archive_size", "save_interval", "log_interval")
@@ -307,6 +311,8 @@ class Trainer:
       command_cfg.curriculum_steps = cfg.velocity_curriculum_iterations
       command_cfg.pure_side_fraction = cfg.pure_side_fraction
       command_cfg.fast_straight_fraction = cfg.fast_straight_fraction
+      command_cfg.fast_straight_min = cfg.fast_straight_min
+      command_cfg.fast_straight_max = cfg.fast_straight_max
       if cfg.expert_policy:
         raise ValueError("Velocity training currently collects with its own actor; omit --expert-policy")
     else:

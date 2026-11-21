@@ -1,6 +1,7 @@
 """Resampled velocity commands and a continuous, speed-selected gait clock."""
 from __future__ import annotations
 from dataclasses import dataclass, field
+import math
 import torch
 from mjlab.managers.command_manager import CommandTerm, CommandTermCfg
 from lite3_supermimic.locomotion import gait
@@ -49,7 +50,9 @@ class VelocityGaitCommand(CommandTerm):
       if fast_fraction:
         fast_straight = (~standing & (moving_sample >= side_fraction)
                          & (moving_sample < side_fraction + fast_fraction))
-        fast_speed = torch.empty(n, device=self.device).uniform_(0.9, 1.1)
+        fast_speed = torch.empty(n, device=self.device).uniform_(
+          self.cfg.fast_straight_min, self.cfg.fast_straight_max
+        )
         target[fast_straight, 0] = fast_speed[fast_straight]
         target[fast_straight, 1:] = 0.0
     target[standing] = 0
@@ -87,6 +90,8 @@ class VelocityGaitCommandCfg(CommandTermCfg):
   standing_fraction: float = 0.2
   pure_side_fraction: float = 0.0
   fast_straight_fraction: float = 0.0
+  fast_straight_min: float = 0.9
+  fast_straight_max: float = 1.1
 
   def build(self, env):
     if not 0 <= self.standing_fraction <= 1:
@@ -95,6 +100,8 @@ class VelocityGaitCommandCfg(CommandTermCfg):
       raise ValueError("pure_side_fraction must be in [0, 1]")
     if not 0 <= self.fast_straight_fraction <= 1 - self.pure_side_fraction:
       raise ValueError("fast_straight_fraction must be nonnegative and leave room for pure_side_fraction")
+    if not 0 < self.fast_straight_min <= self.fast_straight_max < math.inf:
+      raise ValueError("fast straight speeds must satisfy 0 < min <= max and be finite")
     if self.initial_forward <= 0 or self.max_forward < self.initial_forward:
       raise ValueError("max_forward must be >= initial_forward > 0")
     return VelocityGaitCommand(self, env)

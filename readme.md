@@ -97,6 +97,8 @@ python scripts/eval_velocity.py --checkpoint <完整checkpoint> \
 
 中速直行续训可加 `--fast-straight-fraction 0.25`，将约 25% 的非站立指令分给 0.9–1.1 m/s 的纯前进，侧向速度和偏航角速度为零。这部分指令独立于 `--max-forward` 的速度课程。纯侧移和中速直行占用不同的采样份额，两者之和最多为 1。
 
+用 `--fast-straight-min 1.10 --fast-straight-max 1.30` 可将这部分样本集中到 1.1–1.3 m/s。其余指令继续按速度课程采样。
+
 平地速度任务将 critic 自举值限制在当前奖励所允许的折扣回报上限。默认权重下，每步最高 0.1 分，长期回报最多 10 分。训练日志分别记录想象步内累计奖励 `imagined_step_return`、末端 critic 原始估值 `critic_terminal_value`，以及计入 actor 目标的 `imagined_bootstrap_return`。要排查末端估值的影响，可用 `--actor-bootstrap-weight 0`，此时 actor 仍通过世界模型优化想象步内奖励，critic 继续拟合自己的价值目标。
 
 当前未提供此任务训练完成的权重。macOS CPU 检查不能验证 CUDA 并行训练、收敛效果或真机安全运行。固定步态与自动步态的训练设置保存在检查点中，续训使用相同设置。评估可以通过 `--gait` 覆盖，但跨设置表现取决于训练覆盖。

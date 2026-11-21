@@ -320,7 +320,9 @@ def test_training_loop_saves_only_validated_candidates_when_enabled(tmp_path, va
 
 
 @pytest.mark.parametrize('kwargs', [{'gait': 'unknown'}, {'max_forward': -1},
-                                    {'bound_enter': 1.0}, {'velocity_curriculum_iterations': 0}])
+                                    {'bound_enter': 1.0}, {'velocity_curriculum_iterations': 0},
+                                    {'fast_straight_min': 1.3, 'fast_straight_max': 1.1},
+                                    {'fast_straight_max': float('inf')}])
 def test_invalid_velocity_training_settings_fail_early(kwargs):
   from lite3_supermimic.supermimic.train import TrainCfg
   with pytest.raises(ValueError):
@@ -363,22 +365,23 @@ def test_pure_side_sampling_retains_standing_and_covers_both_directions():
   torch.testing.assert_close(term.state[:, 3:6], torch.zeros(env.num_envs, 3))
 
 
-def test_fast_straight_sampling_preserves_the_side_and_standing_allocations():
+@pytest.mark.parametrize('band', [{}, {'fast_straight_min': 1.1, 'fast_straight_max': 1.3}])
+def test_fast_straight_sampling_preserves_the_side_and_standing_allocations(band):
   from lite3_supermimic.locomotion.command import VelocityGaitCommandCfg
 
   env = SimpleNamespace(num_envs=4096, device='cpu', scene={'robot': None},
                         common_step_counter=7600)
   cfg = VelocityGaitCommandCfg(resampling_time_range=(4., 8.), max_forward=.8,
-                               pure_side_fraction=.35, fast_straight_fraction=.25)
+                               pure_side_fraction=.35, fast_straight_fraction=.25, **band)
   command = cfg.build(env)
   with torch.random.fork_rng(devices=[]):
     torch.manual_seed(42)
     command.reset(torch.arange(env.num_envs))
   vx, vy, yaw = command.state[:, :3].unbind(-1)
-  fast = vx >= .9
+  fast = vx >= cfg.fast_straight_min
   side = (vx == 0) & (vy.abs() == .1) & (yaw == 0)
   stand = (vx == 0) & (vy == 0) & (yaw == 0)
-  assert ((vx[fast] <= 1.1) & (vy[fast] == 0) & (yaw[fast] == 0)).all()
+  assert ((vx[fast] <= cfg.fast_straight_max) & (vy[fast] == 0) & (yaw[fast] == 0)).all()
   assert vx[~fast].max() < .62
   assert fast.float().mean().item() == pytest.approx(.8 * .25, abs=.025)
   assert side.float().mean().item() == pytest.approx(.8 * .35, abs=.025)
