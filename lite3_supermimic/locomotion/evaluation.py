@@ -49,6 +49,12 @@ class VelocityEvaluation:
     self.unwrapped = env
     self.cfg, self.num_envs, self.device = env.cfg, env.num_envs, env.device
     self.term = env.command_manager.get_term("velocity")
+    self.stair_field = getattr(self.term, "height_field", None)
+    if self.stair_field is not None:
+      self.stair_valid = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+      self.stair_success = torch.zeros_like(self.stair_valid)
+      self.stair_hold = torch.zeros_like(self.stair_valid, dtype=torch.long)
+      self.stair_max_x = self.term.state.new_full((self.num_envs,), -math.inf)
     self.action_bounds = None
     if hipx_target_limit:
       consts = st.robot_consts(env)
@@ -165,6 +171,19 @@ class VelocityEvaluation:
     self.obs, _, terminated, truncated, _ = result
     # Auto-reset states must be excluded from kinematic errors.
     keep = ~(terminated | truncated)
+    if self.stair_field is not None:
+      from lite3_supermimic.locomotion.stairs import HALF_WIDTH, RISERS
+
+      robot = env.scene["robot"]
+      feet = st.limb_positions_w(robot)["feet"]
+      self.stair_valid &= keep
+      self.stair_max_x = torch.where(self.stair_valid,
+        torch.maximum(self.stair_max_x, robot.data.root_link_pos_w[:, 0]), self.stair_max_x)
+      on_top = ((feet[..., 0] > RISERS[-1] + .05)
+                & (feet[..., 1].abs() < HALF_WIDTH)
+                & (feet[..., 2] > self.stair_field.height * len(RISERS))).all(dim=-1)
+      self.stair_hold = torch.where(on_top & self.stair_valid, self.stair_hold + 1, 0)
+      self.stair_success |= self.stair_hold * env.step_dt >= .3
     if self.turn_front_assist:
       self.assist.reset(~keep)
     s = st.robot_state(env)
@@ -247,6 +266,15 @@ class VelocityEvaluation:
     result = {name: self._summary(values) for name, values in self.metrics.items() if values["samples"]}
     if self.turn_front_assist:
       result["turn_front_assist"] = {"assisted_env_steps": int(self.assisted_samples)}
+    if self.stair_field is not None:
+      result["stairs"] = {
+        "step_height_m": self.stair_field.height,
+        "attempts": self.num_envs,
+        "completed_ascent": int(self.stair_success.sum()),
+        "completed_ascent_without_reset": int((self.stair_success & self.stair_valid).sum()),
+        "max_forward_x_m_by_env": [value if math.isfinite(value) else None
+                                   for value in self.stair_max_x.tolist()],
+      }
     if self.segment_metrics:
       segments = []
       for index, (speed, values) in enumerate(zip(self.vx_sequence, self.segment_metrics)):
@@ -285,7 +313,7 @@ class VelocityEvaluation:
 
 
 def velocity_play_cfg(gait_cfg, num_envs, seed=None, *, record_footfalls=False, step_height=None,
-                      turn_front_assist=False):
+                      turn_front_assist=False, stair_level=0):
   from mjlab.tasks.registry import load_env_cfg
 
   cfg = load_env_cfg("Lite3-Velocity-Flat", play=True)
@@ -295,6 +323,10 @@ def velocity_play_cfg(gait_cfg, num_envs, seed=None, *, record_footfalls=False, 
   cmd_cfg.gait = gait_cfg
   cmd_cfg.resampling_time_range = (1e9, 1e9)
   cmd_cfg.standing_fraction = 1.0
+  if stair_level:
+    from lite3_supermimic.locomotion.stairs import configure_stair_course
+
+    configure_stair_course(cfg, stair_level)
   if step_height is not None:
     import mujoco
     from mjlab.entity import EntityCfg

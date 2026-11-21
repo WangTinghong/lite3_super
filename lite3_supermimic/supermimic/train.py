@@ -33,6 +33,10 @@ from lite3_supermimic.target import terrain as tr
 @dataclass(kw_only=True)
 class TrainCfg:
   task: str = "Lite3-Velocity-Flat"
+  stair_level: int = 0
+  """Optional uphill stair course, levels 1–5 correspond to 2, 4, 6, 8 and 10 cm."""
+  stair_warmup_iterations: int = 300
+  """Refit the world model on each stair course before updating the actor."""
   gait: str = "auto"
   """Velocity task gait: auto, walk, trot or bound."""
   max_forward: float = 2.0
@@ -173,6 +177,10 @@ class TrainCfg:
 
 
   def __post_init__(self):
+    if not 0 <= self.stair_level <= 5 or self.stair_warmup_iterations < 0:
+      raise ValueError("stair_level must be in [0, 5] and stair warmup must be nonnegative")
+    if self.stair_level and (self.task != "Lite3-Velocity-Flat" or self.gait not in ("auto", "walk")):
+      raise ValueError("stairs require Lite3 velocity with auto or walk gait")
     if not math.isfinite(self.actor_anchor_weight) or self.actor_anchor_weight < 0:
       raise ValueError("actor_anchor_weight must be finite and nonnegative")
     if not 0 <= self.actor_bootstrap_weight <= 1:
@@ -371,6 +379,10 @@ class Trainer:
         command_cfg.reward_weights.turn_front_clearance = -0.60
       if cfg.expert_policy:
         raise ValueError("Velocity training currently collects with its own actor; omit --expert-policy")
+      if cfg.stair_level:
+        from lite3_supermimic.locomotion.stairs import configure_stair_course
+        configure_stair_course(env_cfg, cfg.stair_level, training=True)
+        command_cfg.reward_weights.gait_height = 0.5
     else:
       env_cfg.commands["target"].target.curriculum_steps = cfg.target_curriculum_iterations
     if "terrain_levels" in env_cfg.curriculum:
@@ -416,9 +428,9 @@ class Trainer:
       imag_cfg = ImagineCfg(horizon=cfg.horizon, dt=self.env.step_dt, compile=cfg.compile,
                             fall_angle_deg=60.0, weights=command_cfg.reward_weights,
                             actor_bootstrap_weight=cfg.actor_bootstrap_weight)
-      self.field = None
+      self.field = self.term.height_field
       self.imag = LocomotionImagination(imag_cfg, self.consts, command_cfg.gait,
-                                         self.history, self.dev, cfg.hipx_target_limit)
+                                         self.history, self.dev, cfg.hipx_target_limit, field=self.field)
     else:
       weights = RewardWeights(**{f.name: env_cfg.rewards[f.name].weight
                                  for f in fields(RewardWeights) if f.name in env_cfg.rewards})
@@ -455,6 +467,10 @@ class Trainer:
     self.actor_anchor: Actor | None = None
     if cfg.resume:
       self.load(cfg.resume)
+    if cfg.stair_level:
+      self.actor_frozen_until = max(self.actor_frozen_until, self.start_it + cfg.stair_warmup_iterations)
+      print(f"stairs level {cfg.stair_level}: world-model warmup until iteration {self.actor_frozen_until}",
+            flush=True)
 
   def load(self, path: str) -> None:
     ckpt = torch.load(path, map_location=self.dev, weights_only=False)
@@ -616,7 +632,8 @@ class Trainer:
 
   def _relief(self, pose: torch.Tensor) -> torch.Tensor:
     if self.locomotion:
-      return pose.new_zeros(pose.shape[0], tr.SCAN_POINTS)
+      return tr.relief(pose[:, :2], pose[:, 2], self.field) if self.field is not None else (
+        pose.new_zeros(pose.shape[0], tr.SCAN_POINTS))
     return tr.relief(pose[:, :2], pose[:, 2], self.field, self.term.obstacle_layout)
 
   def _gather(self, env, idx, valid) -> dict[str, torch.Tensor]:

@@ -15,6 +15,10 @@ class VelocityGaitCommand(CommandTerm):
     super().__init__(cfg, env)
     self.state = gait.initial_state(self.num_envs, self.device)
     self.robot = env.scene["robot"]
+    self.height_field = None
+    if cfg.stair_level:
+      from lite3_supermimic.locomotion.stairs import StairField
+      self.height_field = StairField(cfg.stair_level)
     for name in ("velocity_error", "yaw_error", "bound_fraction"):
       self.metrics[name] = torch.zeros(self.num_envs, device=self.device)
 
@@ -28,6 +32,10 @@ class VelocityGaitCommand(CommandTerm):
 
   def _resample_command(self, env_ids):
     n = len(env_ids)
+    if self.cfg.stair_level:
+      self.state[env_ids, :3] = 0.
+      self.state[env_ids, 0] = torch.empty(n, device=self.device).uniform_(0.25, 0.38)
+      return
     progress = min(1.0, self._env.common_step_counter / max(1, self.cfg.curriculum_steps))
     max_forward = self.cfg.initial_forward + progress * (self.cfg.max_forward - self.cfg.initial_forward)
     target = torch.empty(n, 3, device=self.device)
@@ -109,6 +117,7 @@ class VelocityGaitCommandCfg(CommandTermCfg):
   bound_straight_fraction: float = 0.0
   bound_straight_min: float = 1.55
   bound_straight_max: float = 1.65
+  stair_level: int = 0
 
   def build(self, env):
     if not 0 <= self.standing_fraction <= 1:

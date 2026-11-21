@@ -28,8 +28,11 @@ def main():
                   help="Split a fixed-command run into acceleration and steady-state windows.")
   ap.add_argument("--footfall-output", type=Path,
                   help="Save steady-state foot contact timing and pair metrics as JSON.")
-  ap.add_argument("--step-height", type=float,
-                  help="Place one test step of this height in meters directly ahead.")
+  terrain = ap.add_mutually_exclusive_group()
+  terrain.add_argument("--step-height", type=float,
+                       help="Place one test step of this height in meters directly ahead.")
+  terrain.add_argument("--stair-level", type=int, choices=range(1, 6),
+                       help="Evaluate on the five-step uphill curriculum course.")
   ap.add_argument("--vy", type=float, default=0)
   ap.add_argument("--yaw-rate", type=float, default=0)
   ap.add_argument("--hipx-target-limit", type=float, help="Override the checkpoint's action limits for comparison.")
@@ -56,13 +59,16 @@ def main():
     ap.error("--footfall-output requires --acceleration-seconds")
   if args.turn_front_assist and (
       args.vx != 0 or args.vy != 0 or args.yaw_rate != .35 or args.gait != "auto"
-      or args.step_height is not None):
+      or args.step_height is not None or args.stair_level is not None):
     ap.error("--turn-front-assist requires --gait auto --vx 0 --vy 0 --yaw-rate 0.35 on flat ground")
   if args.step_height is not None and (
       not math.isfinite(args.step_height) or args.step_height <= 0
       or args.vx is None or args.vx <= 0 or args.vy != 0 or args.yaw_rate != 0
       or args.footfall_output is not None):
     ap.error("--step-height requires a positive height and fixed straight command without --footfall-output")
+  if args.stair_level and (args.vx is None or not 0 < args.vx <= .40 or args.vy != 0
+                           or args.yaw_rate != 0 or args.footfall_output is not None):
+    ap.error("--stair-level requires a forward command in (0, 0.40] without --footfall-output")
   if args.hipx_target_limit is not None and (
       not math.isfinite(args.hipx_target_limit) or args.hipx_target_limit < 0):
     ap.error("--hipx-target-limit must be finite and nonnegative")
@@ -86,7 +92,8 @@ def main():
     gait_cfg.mode = args.gait
   record_footfalls = args.footfall_output is not None
   cfg = velocity_play_cfg(gait_cfg, args.num_envs, args.seed, record_footfalls=record_footfalls,
-                          step_height=args.step_height, turn_front_assist=args.turn_front_assist)
+                          step_height=args.step_height, turn_front_assist=args.turn_front_assist,
+                          stair_level=args.stair_level or 0)
   step_dt = cfg.sim.mujoco.timestep * cfg.decimation
   if args.seconds is None and args.vx_sequence is not None:
     steps = len(args.vx_sequence) * max(1, round(args.segment_seconds / step_dt))
@@ -98,7 +105,7 @@ def main():
     acceleration_steps = round(args.acceleration_seconds / step_dt)
     if not 0 < acceleration_steps < steps:
       ap.error("both evaluation windows must contain at least one simulation step")
-  if args.vx_sequence is not None or acceleration_steps is not None:
+  if args.vx_sequence is not None or acceleration_steps is not None or args.stair_level:
     # A time-out reset would replace a deceleration test with another start from rest.
     cfg.episode_length_s = max(cfg.episode_length_s, steps * step_dt + 1.0)
   env = ManagerBasedRlEnv(cfg=cfg, device="cuda:0", render_mode="rgb_array" if args.video else None)

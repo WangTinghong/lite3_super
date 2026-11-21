@@ -24,15 +24,26 @@ def locomotion_reward(env):
     if not hasattr(term, "foot_site_ids"):
       term.foot_site_ids, _ = term.robot.find_sites(st.FOOT_SITES, preserve_order=True)
     foot_velocity_xy = term.robot.data.site_lin_vel_w[:, term.foot_site_ids, :2]
+  field = getattr(term, "height_field", None)
+  state = st.robot_state(env) if field is None else st.robot_state(env, field=field)
+  height = None
+  if field is not None:
+    from lite3_supermimic.locomotion.stairs import local_foot_heights
+    height = local_foot_heights(state, st.planar_pose(env), field)
   return weighted_reward(reward_terms(
-    st.robot_state(env), env.action_manager.action, env.action_manager.prev_action,
+    state, env.action_manager.action, env.action_manager.prev_action,
     term.state, term.robot_consts, term.cfg.gait, foot_velocity_xy=foot_velocity_xy,
     front_clearance_enabled=bool(weights.turn_front_clearance),
+    foot_height=height,
   ), weights)
 
 
 def low_body(env):
-  return env.scene["robot"].data.root_link_pos_w[:, 2] < 0.12
+  from lite3_supermimic.target.terrain import ground
+
+  base = env.scene["robot"].data.root_link_pos_w
+  field = env.command_manager.get_term("velocity").height_field
+  return base[:, 2] - ground(base[:, :2], field) < 0.12
 
 
 def flat_velocity_env_cfg(play=False):

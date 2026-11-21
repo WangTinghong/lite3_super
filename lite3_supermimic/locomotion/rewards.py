@@ -59,7 +59,7 @@ def bound_pair_errors(height, stance):
 
 
 def reward_terms(s, action, previous_action, command, consts, gait: GaitCfg, *,
-                 foot_velocity_xy=None, front_clearance_enabled=False):
+                 foot_velocity_xy=None, front_clearance_enabled=False, foot_height=None):
   target_velocity = command[:, :3]
   velocity = command[:, 3:6]
   planar_error = s[:, st.V_YAW][:, :2] - velocity[:, :2]
@@ -72,7 +72,7 @@ def reward_terms(s, action, previous_action, command, consts, gait: GaitCfg, *,
   speed_ramp = ((velocity[:, 0] - 0.90) / 0.20).clamp(0.0, 1.0)
   mid_straight = speed_ramp * (mid_speed_target & straight_target & straight_command & trot)
   _, _, stance, swing_height = foot_schedule(command, gait)
-  height = st.feet_world_z(s) - st.FOOT_RADIUS
+  height = st.feet_world_z(s) - st.FOOT_RADIUS if foot_height is None else foot_height
   bound_weight = (command[:, 10] == 2) * command[:, 9].square()
   pair_sync, pair_timing = bound_pair_errors(height, stance)
   turn = turn_slip = turn_clearance = front_clearance = torch.zeros_like(velocity[:, 2])

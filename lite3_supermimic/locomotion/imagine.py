@@ -9,6 +9,8 @@ from lite3_supermimic.supermimic.imagine import Imagination
 from lite3_supermimic.locomotion import gait
 from lite3_supermimic.locomotion.actions import action_bounds
 from lite3_supermimic.locomotion.rewards import reward_terms, weighted_reward
+from lite3_supermimic.locomotion.stairs import local_foot_heights
+from lite3_supermimic.target import terrain as tr
 
 OBS_TERMS = st.OBS_TERMS[:-1] + (("velocity_gait", gait.OBS_DIM),)
 
@@ -20,10 +22,11 @@ def obs_frame(s, action, command, encoder_bias, gait_cfg, noise=False):
 
 
 class LocomotionImagination(Imagination):
-  def __init__(self, cfg, consts, gait_cfg, history, device, hipx_target_limit=0.0):
+  def __init__(self, cfg, consts, gait_cfg, history, device, hipx_target_limit=0.0, field=None):
     self.cfg, self.c, self.gait_cfg = cfg, consts, gait_cfg
     self.h, self.device, self.terms = history, device, OBS_TERMS
     self.hipx_target_limit = hipx_target_limit
+    self.field = field
     self.max_return = float("inf")
     if cfg.gamma < 1:
       self.max_return = cfg.weights.upper_reward_rate() * cfg.dt / (1 - cfg.gamma)
@@ -55,6 +58,8 @@ class LocomotionImagination(Imagination):
       low, high = action_bounds(k["default_q"], k["action_scale"], k["soft_limits"], self.hipx_target_limit)
       action = requested_action.clamp(low, high)
     relief = s.new_zeros(s.shape[0], st.SCAN_POINTS)
+    if self.field is not None:
+      relief = tr.relief(pose[:, :2], pose[:, 2], self.field, grad=True)
     s_next, dpose = wm(s, action, a_prev, xi, relief)
     pose_next = st.apply_pose_delta(pose, dpose)
     constants = st.RobotConsts(k["default_q"], k["action_scale"], self.c.kp,
@@ -66,7 +71,9 @@ class LocomotionImagination(Imagination):
       foot_velocity_xy = (next_feet - previous_feet) / dt.reshape(-1, 1, 1).clamp_min(1e-6)
     terms = reward_terms(s_next, action, a_prev, command, constants, self.gait_cfg,
                          foot_velocity_xy=foot_velocity_xy,
-                         front_clearance_enabled=bool(self.cfg.weights.turn_front_clearance))
+                         front_clearance_enabled=bool(self.cfg.weights.turn_front_clearance),
+                         foot_height=local_foot_heights(s_next, pose_next, self.field)
+                         if self.field is not None else None)
     death = self.fall_prob(s_next)
     # Clamping zeros the dynamics gradient outside the limits. This penalty
     # still pushes the actor's raw requests back into the executable range.
