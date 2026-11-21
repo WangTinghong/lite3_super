@@ -4,6 +4,7 @@ import math
 import torch
 
 from lite3_supermimic.locomotion.actions import action_bounds
+from lite3_supermimic.locomotion.footfalls import summarize_footfalls
 from lite3_supermimic.locomotion.gait import GAITS, foot_schedule
 from lite3_supermimic.robot.constants import HIP_X_JOINT_INDICES, LEGS
 from lite3_supermimic.supermimic import state as st
@@ -13,7 +14,8 @@ class VelocityEvaluation:
   """Share command playback and metrics between the batch loop and mjlab viewer."""
 
   def __init__(self, env, *, vx=None, vy=0.0, yaw_rate=0.0, hipx_target_limit=0.0,
-               vx_sequence=None, segment_seconds=5.0, acceleration_steps=None, total_steps=None):
+               vx_sequence=None, segment_seconds=5.0, acceleration_steps=None, total_steps=None,
+               record_footfalls=False):
     self.unwrapped = env
     self.cfg, self.num_envs, self.device = env.cfg, env.num_envs, env.device
     self.term = env.command_manager.get_term("velocity")
@@ -41,6 +43,15 @@ class VelocityEvaluation:
     self.segment_metrics = [self._empty_metrics() for _ in self.vx_sequence or ()]
     self.acceleration_steps = acceleration_steps
     self.total_steps = total_steps
+    self.foot_contacts = None
+    if record_footfalls:
+      if acceleration_steps is None:
+        raise ValueError("footfall recording requires a steady-state window")
+      self.contact_sensor = env.scene["footfall_ground_contact"]
+      names = list(self.contact_sensor.primary_names)
+      self.contact_order = [names.index(f"{leg}_{part}_collision")
+                            for leg in LEGS for part in ("FOOT", "SHANK")]
+      self.foot_contacts = []
     if acceleration_steps is not None:
       self.window_metrics = {name: self._empty_metrics() for name in ("acceleration", "steady_state")}
       self.heading_change = self.term.state.new_zeros(self.num_envs)
@@ -121,6 +132,9 @@ class VelocityEvaluation:
         delta = st.planar_pose(env)[:, 2] - heading_before
         self.heading_valid &= keep & torch.isfinite(delta)
         self.heading_change += torch.where(self.heading_valid, torch.atan2(delta.sin(), delta.cos()), 0.)
+        if self.foot_contacts is not None:
+          found = self.contact_sensor.data.found[:, self.contact_order]
+          self.foot_contacts.append((found > 0).reshape(self.num_envs, len(LEGS), 2).any(dim=-1))
     if self.writer and self.step_index % self.video_stride == 0:
       self.writer.add_image(env.render())
     self.step_index += 1
@@ -128,6 +142,20 @@ class VelocityEvaluation:
 
   def close(self):
     self.unwrapped.close()
+
+  def footfall_summary(self):
+    if self.foot_contacts is None:
+      raise ValueError("footfall recording is disabled")
+    keep = self.heading_valid & (self.step_index == self.total_steps)
+    env_ids = keep.nonzero().flatten().tolist()
+    dt = self.unwrapped.step_dt
+    start_s = self.acceleration_steps * dt
+    result = {"start_s": start_s, "end_s": self.step_index * dt, "sample_dt_s": dt,
+              "contact_geometries": ["foot", "shank"], "env_ids": env_ids}
+    if self.foot_contacts and env_ids:
+      contacts = torch.stack(self.foot_contacts, dim=0)[:, keep].cpu()
+      result.update(summarize_footfalls(contacts, dt, start_s))
+    return result
 
   def _summary(self, values):
     n = values["samples"]
@@ -187,7 +215,7 @@ class VelocityEvaluation:
     return result
 
 
-def velocity_play_cfg(gait_cfg, num_envs, seed=None):
+def velocity_play_cfg(gait_cfg, num_envs, seed=None, *, record_footfalls=False):
   from mjlab.tasks.registry import load_env_cfg
 
   cfg = load_env_cfg("Lite3-Velocity-Flat", play=True)
@@ -197,4 +225,17 @@ def velocity_play_cfg(gait_cfg, num_envs, seed=None):
   cmd_cfg.gait = gait_cfg
   cmd_cfg.resampling_time_range = (1e9, 1e9)
   cmd_cfg.standing_fraction = 1.0
+  if record_footfalls:
+    from mjlab.sensor import ContactMatch, ContactSensorCfg
+
+    # The 25 mm shank capsule extends past the 22 mm foot sphere at rest.
+    # Count either collision geometry so the supporting leg still registers.
+    cfg.scene.sensors += (ContactSensorCfg(
+      name="footfall_ground_contact",
+      primary=ContactMatch(mode="geom", pattern=r"[FH][LR]_(FOOT|SHANK)_collision", entity="robot"),
+      secondary=ContactMatch(mode="body", pattern="terrain"),
+      fields=("found",),
+      reduce="maxforce",
+      num_slots=1,
+    ),)
   return cfg

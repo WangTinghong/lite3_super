@@ -18,6 +18,8 @@ class RewardWeights:
   upright: float = 0.5
   base_height: float = 0.5
   gait_height: float = 1.0
+  bound_pair_sync: float = 0.0
+  bound_pair_timing: float = 0.0
   vertical_velocity: float = -0.2
   tilt_rate: float = -0.03
   joint_deviation: float = -0.03
@@ -30,13 +32,26 @@ class RewardWeights:
 
   def upper_reward_rate(self) -> float:
     bounded_terms = {"track_velocity", "track_yaw", "upright", "base_height", "gait_height", "terminated",
-                     "mid_straight_vx_error", "mid_straight_vy_error", "mid_straight_yaw_error"}
+                     "mid_straight_vx_error", "mid_straight_vy_error", "mid_straight_yaw_error",
+                     "bound_pair_sync", "bound_pair_timing"}
     # These terms are in [0, 1]. A positive weight on any other term may
     # make the reward unbounded, so only cap when the bound is valid.
     positive_terms = [term for term in fields(self) if getattr(self, term.name) > 0]
     if any(term.name not in bounded_terms for term in positive_terms):
       return math.inf
     return sum(getattr(self, term.name) for term in positive_terms)
+
+
+def bound_pair_errors(height, stance):
+  # Use the same differentiable clearance proxy in simulation and imagination.
+  support = torch.sigmoid((0.02 - height) / 0.008)
+  fl, fr, hl, hr = support.unbind(-1)
+  sync = 0.5 * ((fl - fr).square() + (hl - hr).square())
+  # Match the front/rear contrast over the clock cycle, including flight.
+  front_minus_hind = 0.5 * (fl + fr - hl - hr)
+  expected = stance[:, :2].mean(-1) - stance[:, 2:].mean(-1)
+  timing = (0.5 * (front_minus_hind - expected)).square()
+  return sync, timing
 
 
 def reward_terms(s, action, previous_action, command, consts, gait: GaitCfg):
@@ -53,6 +68,8 @@ def reward_terms(s, action, previous_action, command, consts, gait: GaitCfg):
   mid_straight = speed_ramp * (mid_speed_target & straight_target & straight_command & trot)
   _, _, stance, swing_height = foot_schedule(command, gait)
   height = st.feet_world_z(s) - st.FOOT_RADIUS
+  bound_weight = (command[:, 10] == 2) * command[:, 9].square()
+  pair_sync, pair_timing = bound_pair_errors(height, stance)
   # Stance feet stay on the floor, swing feet follow the gait's clearance arc.
   height_error = (height - swing_height).square()
   moving = (velocity[:, :2].norm(dim=-1) + velocity[:, 2].abs()) > gait.stand_speed
@@ -74,6 +91,8 @@ def reward_terms(s, action, previous_action, command, consts, gait: GaitCfg):
     "upright": torch.exp(-s[:, st.GRAV][:, :2].square().sum(-1) / 0.16),
     "base_height": torch.exp(-(s[:, 0] - 0.28).square() / 0.0025),
     "gait_height": (torch.exp(-height_error / 0.0009) * (0.5 + 0.5 * stance)).mean(-1),
+    "bound_pair_sync": bound_weight * pair_sync,
+    "bound_pair_timing": bound_weight * pair_timing,
     "vertical_velocity": s[:, 6].square(),
     "tilt_rate": s[:, st.W_B][:, :2].square().sum(-1),
     "joint_deviation": joint_offset.square().sum(-1),

@@ -147,6 +147,42 @@ def test_mid_speed_reward_is_axis_specific_and_applies_only_to_straight_trot():
   assert state.grad[3, st.W_B.stop - 1] > 0
 
 
+def test_bound_pair_reward_prefers_matching_front_and_hind_contacts():
+  command = initial_state(4, 'cpu')
+  command[:, 0] = command[:, 3] = 1.60
+  command[:, 6] = .20
+  command[:, 7:10] = torch.tensor([0., 0., 1.])
+  command[:, 10] = torch.tensor([2., 2., 2., 1.])
+  height = torch.tensor([[0., 0., .08, .08], [0., .08, .08, 0.],
+                         [.08, .08, 0., 0.], [0., .08, .08, 0.]], requires_grad=True)
+  state = torch.zeros(4, st.STATE_DIM)
+  state[:, st.FEET.start + 2:st.FEET.stop:3] = height + st.FOOT_RADIUS
+  actions = torch.zeros(4, 12)
+  terms = reward_terms(state, actions, actions, command, consts(4), GaitCfg())
+  sync, timing = terms['bound_pair_sync'], terms['bound_pair_timing']
+  assert sync[0] < sync[1]
+  assert timing[0] < timing[1] < timing[2]
+  assert sync[3] == timing[3] == 0
+  (sync + timing).sum().backward()
+  assert torch.isfinite(height.grad).all()
+  assert height.grad[1].abs().sum() > 0
+  assert torch.count_nonzero(height.grad[3]) == 0
+
+
+def test_footfall_summary_distinguishes_bound_and_trot_without_a_reference_clock():
+  from lite3_supermimic.locomotion.footfalls import summarize_footfalls
+
+  bound = torch.tensor([[1, 1, 0, 0], [0, 0, 0, 0],
+                        [0, 0, 1, 1], [0, 0, 0, 0]], dtype=torch.bool).repeat(2, 1)
+  trot = bound[:, [0, 2, 3, 1]]
+  for contacts, bound_expected in ((bound, True), (trot, False)):
+    stats = summarize_footfalls(contacts[:, None, :], .04, 3.)
+    assert stats['front_pair_mismatch'] == stats['hind_pair_mismatch'] == (0. if bound_expected else .5)
+    assert stats['diagonal_fraction_of_support'] == (0. if bound_expected else 1.)
+    assert stats['pair_bout_alternation_fraction'] == (1. if bound_expected else None)
+    assert stats['events_by_env'][0]['FL'] == {'touchdown_s': [3.20], 'liftoff_s': [3.08, 3.24]}
+
+
 def test_hipx_reward_penalizes_both_sides_and_relaxes_during_maneuvers():
   from lite3_supermimic.robot.constants import HIP_X_JOINT_INDICES
 

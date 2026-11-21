@@ -26,6 +26,8 @@ def main():
   ap.add_argument("--segment-seconds", type=float, default=5, help="Duration per speed command in a sequence.")
   ap.add_argument("--acceleration-seconds", type=float,
                   help="Split a fixed straight run into acceleration and steady-state windows.")
+  ap.add_argument("--footfall-output", type=Path,
+                  help="Save steady-state foot contact timing and pair metrics as JSON.")
   ap.add_argument("--vy", type=float, default=0)
   ap.add_argument("--yaw-rate", type=float, default=0)
   ap.add_argument("--hipx-target-limit", type=float, help="Override the checkpoint's action limits for comparison.")
@@ -46,6 +48,8 @@ def main():
       or not math.isfinite(args.acceleration_seconds)
       or not 0 < args.acceleration_seconds < (60 if args.seconds is None else args.seconds)):
     ap.error("--acceleration-seconds requires a positive fixed straight command and a split within the run")
+  if args.footfall_output is not None and args.acceleration_seconds is None:
+    ap.error("--footfall-output requires --acceleration-seconds")
   if args.hipx_target_limit is not None and (
       not math.isfinite(args.hipx_target_limit) or args.hipx_target_limit < 0):
     ap.error("--hipx-target-limit must be finite and nonnegative")
@@ -67,7 +71,8 @@ def main():
   gait_cfg = GaitCfg(**ckpt["gait_cfg"])
   if args.gait:
     gait_cfg.mode = args.gait
-  cfg = velocity_play_cfg(gait_cfg, args.num_envs, args.seed)
+  record_footfalls = args.footfall_output is not None
+  cfg = velocity_play_cfg(gait_cfg, args.num_envs, args.seed, record_footfalls=record_footfalls)
   step_dt = cfg.sim.mujoco.timestep * cfg.decimation
   if args.seconds is None and args.vx_sequence is not None:
     steps = len(args.vx_sequence) * max(1, round(args.segment_seconds / step_dt))
@@ -88,7 +93,8 @@ def main():
     evaluation = VelocityEvaluation(env, vx=args.vx, vy=args.vy, yaw_rate=args.yaw_rate,
                                     hipx_target_limit=hipx_target_limit,
                                     vx_sequence=args.vx_sequence, segment_seconds=args.segment_seconds,
-                                    acceleration_steps=acceleration_steps, total_steps=steps)
+                                    acceleration_steps=acceleration_steps, total_steps=steps,
+                                    record_footfalls=record_footfalls)
     obs, _ = evaluation.reset()
     actor = Actor(obs["actor"].shape[-1], tuple(ckpt["cfg"]["actor_hidden"]), 12).to(env.device)
     actor.load_state_dict(ckpt["actor"])
@@ -110,6 +116,9 @@ def main():
       with torch.no_grad():
         for _ in range(steps):
           evaluation.step(actor(evaluation.get_observations()["actor"]))
+    if args.footfall_output is not None:
+      args.footfall_output.parent.mkdir(parents=True, exist_ok=True)
+      args.footfall_output.write_text(json.dumps(evaluation.footfall_summary(), indent=2) + "\n")
     print(json.dumps(evaluation.summary(), indent=2))
 
 
