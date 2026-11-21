@@ -529,6 +529,25 @@ def test_fast_straight_sampling_preserves_the_side_and_standing_allocations(band
   assert stand.float().mean().item() == pytest.approx(.2, abs=.025)
 
 
+def test_front_turn_assist_waits_for_unload_and_stops_at_touchdown():
+  from lite3_supermimic.locomotion.evaluation import FrontTurnAssist
+
+  assist = FrontTurnAssist(1, 'cpu')
+  turning = torch.tensor([True])
+
+  def gain(progress, contact, load):
+    return assist.gain(torch.tensor([progress]), turning, torch.tensor([contact]),
+                       torch.tensor([load]), .02).item()
+
+  assert gain(.1, True, 30.) == 0.
+  assert 0. < gain(.2, True, 10.) < .34
+  assert gain(.3, False, 0.) > .34
+  assert gain(.4, True, 5.) == 0.
+  assert gain(.5, False, 0.) == 0.
+  assert gain(.9, False, 0.) == 0.
+  assert gain(.2, False, 0.) > 0.
+
+
 def test_velocity_evaluation_separates_the_initial_and_final_stop(monkeypatch):
   from unittest.mock import Mock
   from lite3_supermimic.locomotion.evaluation import VelocityEvaluation

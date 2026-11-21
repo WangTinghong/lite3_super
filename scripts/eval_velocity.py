@@ -37,7 +37,7 @@ def main():
   ap.add_argument("--video", help="Optional MP4 of environment zero.")
   ap.add_argument("--viewer", action="store_true", help="Open a live MuJoCo window on this desktop.")
   ap.add_argument("--turn-front-assist", action="store_true",
-                  help="Replay the tested front-leg lift offsets during a +0.35 rad/s in-place turn.")
+                  help="Assist the unloaded left-front leg during a +0.35 rad/s in-place turn.")
   args = ap.parse_args()
   if args.num_envs is None:
     args.num_envs = 1 if args.viewer else 64
@@ -86,7 +86,7 @@ def main():
     gait_cfg.mode = args.gait
   record_footfalls = args.footfall_output is not None
   cfg = velocity_play_cfg(gait_cfg, args.num_envs, args.seed, record_footfalls=record_footfalls,
-                          step_height=args.step_height)
+                          step_height=args.step_height, turn_front_assist=args.turn_front_assist)
   step_dt = cfg.sim.mujoco.timestep * cfg.decimation
   if args.seconds is None and args.vx_sequence is not None:
     steps = len(args.vx_sequence) * max(1, round(args.segment_seconds / step_dt))

@@ -5,9 +5,39 @@ import torch
 
 from lite3_supermimic.locomotion.actions import action_bounds
 from lite3_supermimic.locomotion.footfalls import summarize_footfalls, summarize_swings
-from lite3_supermimic.locomotion.gait import GAITS, advance, foot_schedule
+from lite3_supermimic.locomotion.gait import GAITS, foot_schedule
 from lite3_supermimic.robot.constants import HIP_X_JOINT_INDICES, JOINT_NAMES, LEGS
 from lite3_supermimic.supermimic import state as st
+
+
+class FrontTurnAssist:
+  """Load-gated left-front swing assistance for evaluation playback."""
+
+  def __init__(self, num_envs, device):
+    self.used = torch.zeros(num_envs, dtype=torch.bool, device=device)
+    self.engaged = torch.zeros_like(self.used)
+    self.airborne = torch.zeros_like(self.used)
+    self.elapsed = torch.zeros(num_envs, device=device)
+
+  def reset(self, mask):
+    self.used[mask] = False
+    self.engaged[mask] = False
+    self.airborne[mask] = False
+    self.elapsed[mask] = 0.
+
+  def gain(self, progress, turning, contact, vertical_load, dt):
+    # Reserve the last part of swing for an unassisted touchdown.
+    swing = turning & (progress > 0.) & (progress < .85)
+    unloaded = vertical_load < 18.
+    self.used &= swing
+    self.engaged &= swing & unloaded & ~(self.airborne & contact)
+    start = swing & (progress < .55) & unloaded & ~self.used
+    self.used |= start
+    self.engaged |= start
+    self.airborne = self.engaged & (self.airborne | ~contact)
+    self.elapsed = torch.where(self.engaged, self.elapsed + dt, 0.)
+    ramp = (self.elapsed / .06).clamp(max=1.)
+    return ramp * torch.sin(math.pi * (progress / .85).clamp(0., 1.)).square()
 
 
 class VelocityEvaluation:
@@ -44,21 +74,20 @@ class VelocityEvaluation:
     self.acceleration_steps = acceleration_steps
     self.total_steps = total_steps
     self.turn_front_assist = turn_front_assist
-    if turn_front_assist:
-      self.assist_remaining = torch.zeros(self.num_envs, 2, device=self.device, dtype=torch.long)
-      self.assist_previous_swing = torch.zeros_like(self.assist_remaining, dtype=torch.bool)
-      self.assist_actions = self.term.state.new_zeros(2, len(JOINT_NAMES))
-      self.assist_actions[0, [JOINT_NAMES.index("FL_HipY_joint"),
-                             JOINT_NAMES.index("FL_Knee_joint")]] = 1.
-      self.assist_actions[1, JOINT_NAMES.index("FR_Knee_joint")] = 1.
-    self.foot_contacts = None
-    if record_footfalls:
-      if acceleration_steps is None:
-        raise ValueError("footfall recording requires a steady-state window")
+    if turn_front_assist or record_footfalls:
       self.contact_sensor = env.scene["footfall_ground_contact"]
       names = list(self.contact_sensor.primary_names)
       self.contact_order = [names.index(f"{leg}_{part}_collision")
                             for leg in LEGS for part in ("FOOT", "SHANK")]
+    if turn_front_assist:
+      self.assist = FrontTurnAssist(self.num_envs, self.device)
+      self.assist_action = self.term.state.new_zeros(len(JOINT_NAMES))
+      self.assist_action[[JOINT_NAMES.index("FL_HipY_joint"), JOINT_NAMES.index("FL_Knee_joint")]] = 1.
+      self.assisted_samples = torch.zeros((), device=self.device, dtype=torch.long)
+    self.foot_contacts = None
+    if record_footfalls:
+      if acceleration_steps is None:
+        raise ValueError("footfall recording requires a steady-state window")
       self.foot_contacts = []
       self.foot_positions = []
       self.foot_site_order = [st.FOOT_SITES.index(leg) for leg in LEGS]
@@ -100,8 +129,7 @@ class VelocityEvaluation:
   def reset(self):
     self.obs, info = self.unwrapped.reset()
     if self.turn_front_assist:
-      self.assist_remaining.zero_()
-      self.assist_previous_swing.zero_()
+      self.assist.reset(slice(None))
     return self.obs, info
 
   def get_observations(self):
@@ -117,20 +145,17 @@ class VelocityEvaluation:
     self.term.state[:, :3] = self.command_cycle[segment]
     command = self.term.state.clone()
     if self.turn_front_assist:
-      gait = self.term.cfg.gait
-      current = foot_schedule(command, gait)[3]
-      ahead = command
-      for _ in range(4):
-        ahead = advance(ahead, env.step_dt, gait)
-      future = foot_schedule(ahead, gait)[3]
-      swing = torch.stack((current[:, st.LEGS.index("FL")], future[:, st.LEGS.index("FR")]), -1) > .012
-      active = (command[:, 5] >= .30) & (command[:, 3:5].norm(dim=-1) < .03)
-      trigger = swing & ~self.assist_previous_swing & active[:, None]
-      self.assist_remaining = torch.where(trigger, 16, self.assist_remaining)
-      self.assist_remaining = torch.where(active[:, None], self.assist_remaining, 0)
-      action = action + (self.assist_remaining > 0).to(action.dtype) @ self.assist_actions
-      self.assist_remaining = (self.assist_remaining - 1).clamp_min(0)
-      self.assist_previous_swing = swing
+      phase, duty, _, _ = foot_schedule(command, self.term.cfg.gait)
+      index = st.LEGS.index("FL")
+      progress = (phase[:, index] - duty[:, 0]) / (1. - duty[:, 0])
+      left_front = self.contact_order[:2]
+      sensor = self.contact_sensor.data
+      contact = (sensor.found[:, left_front] > 0).any(dim=-1)
+      vertical_load = sensor.force[:, left_front, 2].abs().sum(dim=-1)
+      turning = (command[:, 5] >= .30) & (command[:, 3:5].norm(dim=-1) < .03)
+      gain = self.assist.gain(progress, turning, contact, vertical_load, env.step_dt)
+      action = action + gain[:, None] * self.assist_action
+      self.assisted_samples += (gain > 0).sum()
     if self.action_bounds is not None:
       action = action.clamp(*self.action_bounds)
     steady = self.acceleration_steps is not None and self.step_index >= self.acceleration_steps
@@ -141,8 +166,7 @@ class VelocityEvaluation:
     # Auto-reset states must be excluded from kinematic errors.
     keep = ~(terminated | truncated)
     if self.turn_front_assist:
-      self.assist_remaining[~keep] = 0
-      self.assist_previous_swing[~keep] = False
+      self.assist.reset(~keep)
     s = st.robot_state(env)
     hipx = s[:, st.Q][:, HIP_X_JOINT_INDICES]
     gait_cfg = self.term.cfg.gait
@@ -221,6 +245,8 @@ class VelocityEvaluation:
 
   def summary(self):
     result = {name: self._summary(values) for name, values in self.metrics.items() if values["samples"]}
+    if self.turn_front_assist:
+      result["turn_front_assist"] = {"assisted_env_steps": int(self.assisted_samples)}
     if self.segment_metrics:
       segments = []
       for index, (speed, values) in enumerate(zip(self.vx_sequence, self.segment_metrics)):
@@ -258,7 +284,8 @@ class VelocityEvaluation:
     return result
 
 
-def velocity_play_cfg(gait_cfg, num_envs, seed=None, *, record_footfalls=False, step_height=None):
+def velocity_play_cfg(gait_cfg, num_envs, seed=None, *, record_footfalls=False, step_height=None,
+                      turn_front_assist=False):
   from mjlab.tasks.registry import load_env_cfg
 
   cfg = load_env_cfg("Lite3-Velocity-Flat", play=True)
@@ -286,7 +313,7 @@ def velocity_play_cfg(gait_cfg, num_envs, seed=None, *, record_footfalls=False, 
     pose_range = cfg.events["reset_base"].params["pose_range"]
     pose_range.update(x=(0., 0.), y=(0., 0.), yaw=(0., 0.))
     cfg.events.pop("push_robot", None)
-  if record_footfalls:
+  if record_footfalls or turn_front_assist:
     from mjlab.sensor import ContactMatch, ContactSensorCfg
 
     # The 25 mm shank capsule extends past the 22 mm foot sphere at rest.
@@ -295,8 +322,8 @@ def velocity_play_cfg(gait_cfg, num_envs, seed=None, *, record_footfalls=False, 
       name="footfall_ground_contact",
       primary=ContactMatch(mode="geom", pattern=r"[FH][LR]_(FOOT|SHANK)_collision", entity="robot"),
       secondary=ContactMatch(mode="body", pattern="terrain"),
-      fields=("found",),
-      reduce="maxforce",
+      fields=("found", "force") if turn_front_assist else ("found",),
+      reduce="netforce" if turn_front_assist else "maxforce",
       num_slots=1,
     ),)
   return cfg
