@@ -306,11 +306,11 @@ def test_locomotion_imagination_updates_actor_with_finite_gradients():
   assert torch.isfinite(imag.gae_targets(critic, data)).all()
 
 
-@pytest.mark.parametrize('validate', [False, True])
+@pytest.mark.parametrize('validate', [False, True, 'mid_straight'])
 def test_training_loop_saves_only_validated_candidates_when_enabled(tmp_path, validate, capsys):
   from collections import defaultdict
   from unittest.mock import Mock
-  from lite3_supermimic.locomotion.validation import StraightMetrics
+  from lite3_supermimic.locomotion.validation import MidStraightMetrics, StraightMetrics
   from lite3_supermimic.supermimic.train import Trainer, TrainCfg
   trainer = Trainer.__new__(Trainer)
   trainer.cfg = TrainCfg(iterations=2, warmup_iterations=0, log_interval=1, save_interval=1)
@@ -340,7 +340,14 @@ def test_training_loop_saves_only_validated_candidates_when_enabled(tmp_path, va
     accepted = StraightMetrics(.05, .06, .84, 0, 1000)
     regressed = StraightMetrics(.22, .505, .71, 3, 1000)
     validator = Mock()
-    validator.evaluate.side_effect = [reference, accepted, regressed]
+    validator.checks = ((.5, 42),)
+    if validate == 'mid_straight':
+      straight = MidStraightMetrics(.052, .08, .81, 0, 1000, .048, .020, .002, 10.)
+      drifted = MidStraightMetrics(.058, .08, .81, 0, 1000, .048, .032, .030, 20.)
+      validator.checks += ((1.3, 43),)
+      validator.evaluate.side_effect = [reference, straight, accepted, straight, accepted, drifted]
+    else:
+      validator.evaluate.side_effect = [reference, accepted, regressed]
     trainer._run(validator)
     assert saved == [1]
     assert 'FAIL' in capsys.readouterr().out
@@ -352,7 +359,11 @@ def test_training_loop_saves_only_validated_candidates_when_enabled(tmp_path, va
 @pytest.mark.parametrize('kwargs', [{'gait': 'unknown'}, {'max_forward': -1},
                                     {'bound_enter': 1.0}, {'velocity_curriculum_iterations': 0},
                                     {'fast_straight_min': 1.3, 'fast_straight_max': 1.1},
-                                    {'fast_straight_max': float('inf')}])
+                                    {'fast_straight_max': float('inf')},
+                                    {'pure_side_fraction': .35, 'fast_straight_fraction': .4,
+                                     'bound_straight_fraction': .4},
+                                    {'bound_straight_fraction': .25, 'bound_straight_min': 1.50},
+                                    {'validate_mid_straight': True}])
 def test_invalid_velocity_training_settings_fail_early(kwargs):
   from lite3_supermimic.supermimic.train import TrainCfg
   with pytest.raises(ValueError):
@@ -395,7 +406,11 @@ def test_pure_side_sampling_retains_standing_and_covers_both_directions():
   torch.testing.assert_close(term.state[:, 3:6], torch.zeros(env.num_envs, 3))
 
 
-@pytest.mark.parametrize('band', [{}, {'fast_straight_min': 1.1, 'fast_straight_max': 1.3}])
+@pytest.mark.parametrize('band', [
+  {},
+  {'fast_straight_min': 1.1, 'fast_straight_max': 1.3},
+  {'fast_straight_min': 1.1, 'fast_straight_max': 1.3, 'bound_straight_fraction': .25},
+])
 def test_fast_straight_sampling_preserves_the_side_and_standing_allocations(band):
   from lite3_supermimic.locomotion.command import VelocityGaitCommandCfg
 
@@ -408,12 +423,15 @@ def test_fast_straight_sampling_preserves_the_side_and_standing_allocations(band
     torch.manual_seed(42)
     command.reset(torch.arange(env.num_envs))
   vx, vy, yaw = command.state[:, :3].unbind(-1)
-  fast = vx >= cfg.fast_straight_min
+  fast = (vx >= cfg.fast_straight_min) & (vx <= cfg.fast_straight_max)
+  bound = vx >= cfg.bound_straight_min
   side = (vx == 0) & (vy.abs() == .1) & (yaw == 0)
   stand = (vx == 0) & (vy == 0) & (yaw == 0)
-  assert ((vx[fast] <= cfg.fast_straight_max) & (vy[fast] == 0) & (yaw[fast] == 0)).all()
-  assert vx[~fast].max() < .62
+  assert ((vy[fast | bound] == 0) & (yaw[fast | bound] == 0)).all()
+  assert (vx[bound] <= cfg.bound_straight_max).all()
+  assert vx[~(fast | bound)].max() < .62
   assert fast.float().mean().item() == pytest.approx(.8 * .25, abs=.025)
+  assert bound.float().mean().item() == pytest.approx(.8 * cfg.bound_straight_fraction, abs=.025)
   assert side.float().mean().item() == pytest.approx(.8 * .35, abs=.025)
   assert stand.float().mean().item() == pytest.approx(.2, abs=.025)
 

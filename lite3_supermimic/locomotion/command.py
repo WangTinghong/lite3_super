@@ -40,21 +40,27 @@ class VelocityGaitCommand(CommandTerm):
     standing = torch.rand(n, device=self.device) < self.cfg.standing_fraction
     side_fraction = self.cfg.pure_side_fraction
     fast_fraction = self.cfg.fast_straight_fraction
-    if side_fraction or fast_fraction:
+    bound_fraction = self.cfg.bound_straight_fraction
+    if side_fraction or fast_fraction or bound_fraction:
       moving_sample = torch.rand(n, device=self.device)
       if side_fraction:
         side_step = ~standing & (moving_sample < side_fraction)
         direction = torch.where(torch.rand(n, device=self.device) < 0.5, -1.0, 1.0)
         target[side_step] = 0.0
         target[side_step, 1] = 0.1 * direction[side_step]
-      if fast_fraction:
-        fast_straight = (~standing & (moving_sample >= side_fraction)
-                         & (moving_sample < side_fraction + fast_fraction))
-        fast_speed = torch.empty(n, device=self.device).uniform_(
-          self.cfg.fast_straight_min, self.cfg.fast_straight_max
-        )
-        target[fast_straight, 0] = fast_speed[fast_straight]
-        target[fast_straight, 1:] = 0.0
+      bands = (
+        (fast_fraction, self.cfg.fast_straight_min, self.cfg.fast_straight_max),
+        (bound_fraction, self.cfg.bound_straight_min, self.cfg.bound_straight_max),
+      )
+      lower = side_fraction
+      for fraction, min_speed, max_speed in bands:
+        upper = lower + fraction
+        if fraction:
+          straight_sample = ~standing & (moving_sample >= lower) & (moving_sample < upper)
+          speed = torch.empty(n, device=self.device).uniform_(min_speed, max_speed)
+          target[straight_sample, 0] = speed[straight_sample]
+          target[straight_sample, 1:] = 0.0
+        lower = upper
     target[standing] = 0
     self.state[env_ids, :3] = target
 
@@ -92,6 +98,9 @@ class VelocityGaitCommandCfg(CommandTermCfg):
   fast_straight_fraction: float = 0.0
   fast_straight_min: float = 0.9
   fast_straight_max: float = 1.1
+  bound_straight_fraction: float = 0.0
+  bound_straight_min: float = 1.55
+  bound_straight_max: float = 1.65
 
   def build(self, env):
     if not 0 <= self.standing_fraction <= 1:
@@ -100,8 +109,16 @@ class VelocityGaitCommandCfg(CommandTermCfg):
       raise ValueError("pure_side_fraction must be in [0, 1]")
     if not 0 <= self.fast_straight_fraction <= 1 - self.pure_side_fraction:
       raise ValueError("fast_straight_fraction must be nonnegative and leave room for pure_side_fraction")
+    if not (0 <= self.bound_straight_fraction
+            <= 1 - (self.pure_side_fraction + self.fast_straight_fraction)):
+      raise ValueError("bound_straight_fraction must be nonnegative and fit in the remaining moving commands")
     if not 0 < self.fast_straight_min <= self.fast_straight_max < math.inf:
       raise ValueError("fast straight speeds must satisfy 0 < min <= max and be finite")
+    if self.bound_straight_fraction and (
+        self.gait.mode != "auto"
+        or not self.gait.bound_enter < self.bound_straight_min <= self.bound_straight_max < math.inf
+    ):
+      raise ValueError("bound straight sampling requires auto gait and finite speeds above bound_enter")
     if self.initial_forward <= 0 or self.max_forward < self.initial_forward:
       raise ValueError("max_forward must be >= initial_forward > 0")
     return VelocityGaitCommand(self, env)

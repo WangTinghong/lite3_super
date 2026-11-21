@@ -45,6 +45,10 @@ class TrainCfg:
   """Fraction of moving commands reserved for pure forward motion in the fast band."""
   fast_straight_min: float = 0.9
   fast_straight_max: float = 1.1
+  bound_straight_fraction: float = 0.0
+  """Fraction of moving commands reserved for pure forward motion above bound entry speed."""
+  bound_straight_min: float = 1.55
+  bound_straight_max: float = 1.65
   mid_straight_reward: bool = False
   """Penalize per-axis tracking errors more strongly during 1.10–1.30 m/s straight motion."""
   bound_enter: float = 1.5
@@ -151,6 +155,8 @@ class TrainCfg:
   save_interval: int = 1000
   validate_straight: bool = False
   """Stop fine-tuning if a saved candidate regresses in a fixed MuJoCo straight walk."""
+  validate_mid_straight: bool = False
+  """Add 1.10 and 1.30 m/s steady-state straight checks at seeds 42 and 43."""
   seed: int = 0
   run_name: str = "supermimic"
   log_root: str = "logs/lite3_supermimic"
@@ -165,6 +171,8 @@ class TrainCfg:
       raise ValueError("actor_anchor_weight requires a Lite3 velocity --resume checkpoint")
     if self.validate_straight and (self.task != "Lite3-Velocity-Flat" or not self.resume):
       raise ValueError("validate_straight requires a Lite3 velocity --resume checkpoint")
+    if self.validate_mid_straight and not self.validate_straight:
+      raise ValueError("validate_mid_straight requires validate_straight")
     if not 0 <= self.pure_side_fraction <= 1:
       raise ValueError("pure_side_fraction must be in [0, 1]")
     if self.pure_side_fraction and self.task != "Lite3-Velocity-Flat":
@@ -173,6 +181,14 @@ class TrainCfg:
       raise ValueError("fast_straight_fraction must be nonnegative and leave room for pure_side_fraction")
     if self.fast_straight_fraction and self.task != "Lite3-Velocity-Flat":
       raise ValueError("fast_straight_fraction requires the Lite3 velocity task")
+    if not (0 <= self.bound_straight_fraction
+            <= 1 - (self.pure_side_fraction + self.fast_straight_fraction)):
+      raise ValueError("bound_straight_fraction must be nonnegative and fit in the remaining moving commands")
+    if self.bound_straight_fraction and (
+        self.task != "Lite3-Velocity-Flat" or self.gait != "auto"
+        or not self.bound_enter < self.bound_straight_min <= self.bound_straight_max < math.inf
+    ):
+      raise ValueError("bound straight sampling requires Lite3 velocity, auto gait and finite speeds above bound_enter")
     if self.mid_straight_reward and self.task != "Lite3-Velocity-Flat":
       raise ValueError("mid_straight_reward requires the Lite3 velocity task")
     if self.task == "Lite3-Velocity-Flat":
@@ -317,6 +333,9 @@ class Trainer:
       command_cfg.fast_straight_fraction = cfg.fast_straight_fraction
       command_cfg.fast_straight_min = cfg.fast_straight_min
       command_cfg.fast_straight_max = cfg.fast_straight_max
+      command_cfg.bound_straight_fraction = cfg.bound_straight_fraction
+      command_cfg.bound_straight_min = cfg.bound_straight_min
+      command_cfg.bound_straight_max = cfg.bound_straight_max
       if cfg.mid_straight_reward:
         command_cfg.reward_weights.mid_straight_vx_error = -0.40
         command_cfg.reward_weights.mid_straight_vy_error = -0.35
@@ -737,7 +756,10 @@ class Trainer:
       return
     from lite3_supermimic.locomotion.validation import StraightValidation
 
-    validation = StraightValidation(self.term.cfg.gait, self.dev, self.cfg.hipx_target_limit)
+    validation = StraightValidation(
+      self.term.cfg.gait, self.dev, self.cfg.hipx_target_limit,
+      mid_straight=self.cfg.validate_mid_straight,
+    )
     try:
       self._run(validation)
     finally:
@@ -745,12 +767,14 @@ class Trainer:
 
   def _run(self, validation=None) -> None:
     cfg = self.cfg
-    reference = None
+    references = {}
     if validation is not None:
-      reference = validation.evaluate(self.actor)
-      print(f"straight validation reference: {reference}", flush=True)
-      if not reference.passes(reference):
-        raise RuntimeError("reference checkpoint produced no valid straight-walking metrics")
+      for vx, seed in validation.checks:
+        reference = validation.evaluate(self.actor, vx, seed)
+        print(f"straight validation reference vx={vx:.2f} seed={seed}: {reference}", flush=True)
+        if not reference.passes(reference):
+          raise RuntimeError(f"reference checkpoint failed straight validation at {vx:.2f} m/s, seed {seed}")
+        references[vx, seed] = reference
     t_start = time.time()
     while self.buf.size <= cfg.wm_window + 1:
       self.collect()
@@ -802,12 +826,17 @@ class Trainer:
         self._collapse_guard(falls_mean)
       if it % cfg.save_interval == 0 or it == cfg.iterations:
         if validation is not None:
-          candidate = validation.evaluate(self.actor)
-          passed = candidate.passes(reference)
-          for key, value in asdict(candidate).items():
-            self.writer.add_scalar(f"validation/{key}", value, it)
-          print(f"straight validation it {it}: {candidate} | {'PASS' if passed else 'FAIL'}", flush=True)
-          if not passed:
+          all_passed = True
+          for (vx, seed), reference in references.items():
+            candidate = validation.evaluate(self.actor, vx, seed)
+            passed = candidate.passes(reference)
+            prefix = "validation" if vx == 0.5 else f"validation/vx_{vx:.2f}/seed_{seed}"
+            for key, value in asdict(candidate).items():
+              self.writer.add_scalar(f"{prefix}/{key}", value, it)
+            print(f"straight validation it {it} vx={vx:.2f} seed={seed}: {candidate}"
+                  f" | {'PASS' if passed else 'FAIL'}", flush=True)
+            all_passed &= passed
+          if not all_passed:
             print(f"stopping fine-tuning; retained checkpoint: {self.last_ckpt or cfg.resume}", flush=True)
             return
         if self.collapse_strikes == 0:
