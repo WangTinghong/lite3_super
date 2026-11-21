@@ -13,6 +13,8 @@ from lite3_supermimic.locomotion.actions import action_bounds
 from lite3_supermimic.locomotion.evaluation import VelocityEvaluation, velocity_play_cfg
 from lite3_supermimic.locomotion.gait import GaitCfg, foot_schedule
 from lite3_supermimic.locomotion.rewards import reward_terms
+from lite3_supermimic.locomotion.validation import validation_seed
+from lite3_supermimic.robot.constants import JOINT_NAMES
 from lite3_supermimic.supermimic import state as st
 from lite3_supermimic.supermimic.train import Actor
 from lite3_supermimic.supermimic.world_model import WorldModel
@@ -95,6 +97,83 @@ def diagnose(env, actor, model, gait, yaw_rate, hipx_limit):
   }
 
 
+@torch.no_grad()
+def probe_actions(env, actor, model, gait, args, hipx_limit):
+  leg = st.LEGS.index(args.probe_leg)
+  joints = [JOINT_NAMES.index(f"{args.probe_leg}_{joint}_joint") for joint in ("HipY", "Knee")]
+  limits = st.robot_consts(env)
+  low, high = action_bounds(limits.default_q, limits.action_scale, limits.soft_limits, hipx_limit or float("inf"))
+  context = st.ContextReader(env).read()
+  relief = context.new_zeros(env.num_envs, st.SCAN_POINTS)
+  evaluation = VelocityEvaluation(env, vx=0., yaw_rate=args.yaw_rate)
+  prefix, baseline_actions = [], []
+  horizon = 8
+  dt = env.step_dt
+  command = evaluation.term
+
+  with validation_seed(torch.device(env.device), args.seed):
+    obs, _ = evaluation.reset()
+    previous_height = 0.
+    for step in range(round(5 / dt)):
+      height = float(foot_schedule(command.state, gait)[3][0, leg])
+      if step * dt >= 3. and previous_height <= .012 < height:
+        break
+      previous_height = height
+      action = actor(obs["actor"]).clamp(low, high)
+      prefix.append(action)
+      obs, *_ = evaluation.step(action)
+    else:
+      raise RuntimeError("No front-leg swing onset found in the probe window")
+    start_state = st.robot_state(env)
+    for _ in range(horizon):
+      action = actor(obs["actor"]).clamp(low, high)
+      baseline_actions.append(action)
+      obs, *_ = evaluation.step(action)
+
+  def replay(delta):
+    with validation_seed(torch.device(env.device), args.seed):
+      evaluation.reset()
+      for action in prefix:
+        evaluation.step(action)
+      actual = st.robot_state(env)
+      matched = (actual - start_state).abs().amax(dim=-1) < 1e-3
+      previous = prefix[-1]
+      predicted = actual
+      start_height = st.feet_world_z(actual)[:, leg]
+      actual_rises, predicted_rises = [], []
+      for baseline in baseline_actions:
+        action = (baseline + delta).clamp(low, high)
+        predicted, _ = model(predicted, action, previous, context, relief)
+        _, _, terminated, truncated, _ = evaluation.step(action)
+        matched &= ~(terminated | truncated)
+        actual_rises.append(st.feet_world_z(st.robot_state(env))[:, leg] - start_height)
+        predicted_rises.append(st.feet_world_z(predicted)[:, leg] - start_height)
+        previous = action
+    return torch.stack(actual_rises), torch.stack(predicted_rises), matched
+
+  zero = context.new_zeros(12)
+  base_actual, base_predicted, base_valid = replay(zero)
+  results = []
+  for hip in (0., -.15, .15):
+    for knee in (0., -.15, .15):
+      if hip == knee == 0.:
+        continue
+      delta = zero.clone()
+      delta[joints] = delta.new_tensor([hip, knee])
+      actual, predicted, valid = replay(delta)
+      valid &= base_valid
+      real_gain = actual[:, valid].amax(dim=0) - base_actual[:, valid].amax(dim=0)
+      model_gain = predicted[:, valid].amax(dim=0) - base_predicted[:, valid].amax(dim=0)
+      results.append({
+        "delta_normalized_hip_y_knee": [hip, knee],
+        "valid_envs": int(valid.sum()),
+        "mujoco_peak_rise_gain_mm": float(real_gain.mean() * 1000) if real_gain.numel() else None,
+        "model_peak_rise_gain_mm": float(model_gain.mean() * 1000) if model_gain.numel() else None,
+      })
+  return {"leg": args.probe_leg, "yaw_rate_rad_s": args.yaw_rate, "seed": args.seed,
+          "start_s": len(prefix) * dt, "horizon_s": horizon * dt, "perturbations": results}
+
+
 def main():
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument("--checkpoint", required=True)
@@ -102,6 +181,8 @@ def main():
   parser.add_argument("--seed", type=int, default=42)
   parser.add_argument("--num-envs", type=int, default=8)
   parser.add_argument("--device", default="cuda:0")
+  parser.add_argument("--probe-leg", choices=("FL", "FR"),
+                      help="Replay matched actions with small HipY and knee target perturbations.")
   args = parser.parse_args()
   if args.num_envs <= 0:
     parser.error("--num-envs must be positive")
@@ -123,8 +204,13 @@ def main():
     actor.load_state_dict(checkpoint["actor"])
     model = WorldModel(tuple(cfg["wm_hidden"])).to(env.device)
     model.load_state_dict(checkpoint["world_model"])
-    result = diagnose(env, actor.eval(), model.eval(), gait, args.yaw_rate,
-                      cfg.get("hipx_target_limit", 0.))
+    actor.eval()
+    model.eval()
+    hipx_limit = cfg.get("hipx_target_limit", 0.)
+    if args.probe_leg:
+      result = probe_actions(env, actor, model, gait, args, hipx_limit)
+    else:
+      result = diagnose(env, actor, model, gait, args.yaw_rate, hipx_limit)
     weights = (checkpoint.get("command_cfg") or {}).get("reward_weights") or {}
     result["checkpoint_front_clearance_weight"] = weights.get("turn_front_clearance", 0.)
     print(json.dumps(result, indent=2))
