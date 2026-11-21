@@ -37,12 +37,21 @@ class VelocityGaitCommand(CommandTerm):
     straight = target[:, 0] > self.cfg.gait.bound_exit
     target[straight, 1:] = 0
     standing = torch.rand(n, device=self.device) < self.cfg.standing_fraction
-    if self.cfg.pure_side_fraction:
-      # Keep the existing stand probability and reserve some moving commands for side steps.
-      side_step = ~standing & (torch.rand(n, device=self.device) < self.cfg.pure_side_fraction)
-      direction = torch.where(torch.rand(n, device=self.device) < 0.5, -1.0, 1.0)
-      target[side_step] = 0.0
-      target[side_step, 1] = 0.1 * direction[side_step]
+    side_fraction = self.cfg.pure_side_fraction
+    fast_fraction = self.cfg.fast_straight_fraction
+    if side_fraction or fast_fraction:
+      moving_sample = torch.rand(n, device=self.device)
+      if side_fraction:
+        side_step = ~standing & (moving_sample < side_fraction)
+        direction = torch.where(torch.rand(n, device=self.device) < 0.5, -1.0, 1.0)
+        target[side_step] = 0.0
+        target[side_step, 1] = 0.1 * direction[side_step]
+      if fast_fraction:
+        fast_straight = (~standing & (moving_sample >= side_fraction)
+                         & (moving_sample < side_fraction + fast_fraction))
+        fast_speed = torch.empty(n, device=self.device).uniform_(0.9, 1.1)
+        target[fast_straight, 0] = fast_speed[fast_straight]
+        target[fast_straight, 1:] = 0.0
     target[standing] = 0
     self.state[env_ids, :3] = target
 
@@ -77,12 +86,15 @@ class VelocityGaitCommandCfg(CommandTermCfg):
   max_yaw: float = 0.8
   standing_fraction: float = 0.2
   pure_side_fraction: float = 0.0
+  fast_straight_fraction: float = 0.0
 
   def build(self, env):
     if not 0 <= self.standing_fraction <= 1:
       raise ValueError("standing_fraction must be in [0, 1]")
     if not 0 <= self.pure_side_fraction <= 1:
       raise ValueError("pure_side_fraction must be in [0, 1]")
+    if not 0 <= self.fast_straight_fraction <= 1 - self.pure_side_fraction:
+      raise ValueError("fast_straight_fraction must be nonnegative and leave room for pure_side_fraction")
     if self.initial_forward <= 0 or self.max_forward < self.initial_forward:
       raise ValueError("max_forward must be >= initial_forward > 0")
     return VelocityGaitCommand(self, env)

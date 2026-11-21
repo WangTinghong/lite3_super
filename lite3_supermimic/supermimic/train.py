@@ -41,6 +41,8 @@ class TrainCfg:
   velocity_curriculum_iterations: int = 20_000
   pure_side_fraction: float = 0.0
   """Fraction of moving commands reserved for balanced +/-0.1 m/s pure side steps."""
+  fast_straight_fraction: float = 0.0
+  """Fraction of moving commands reserved for straight 0.9–1.1 m/s forward motion."""
   bound_enter: float = 1.5
   bound_exit: float = 1.2
   num_envs: int = 2048
@@ -163,6 +165,10 @@ class TrainCfg:
       raise ValueError("pure_side_fraction must be in [0, 1]")
     if self.pure_side_fraction and self.task != "Lite3-Velocity-Flat":
       raise ValueError("pure_side_fraction requires the Lite3 velocity task")
+    if not 0 <= self.fast_straight_fraction <= 1 - self.pure_side_fraction:
+      raise ValueError("fast_straight_fraction must be nonnegative and leave room for pure_side_fraction")
+    if self.fast_straight_fraction and self.task != "Lite3-Velocity-Flat":
+      raise ValueError("fast_straight_fraction requires the Lite3 velocity task")
     if self.task == "Lite3-Velocity-Flat":
       from lite3_supermimic.locomotion.gait import GaitCfg
       GaitCfg(mode=self.gait, bound_enter=self.bound_enter, bound_exit=self.bound_exit)
@@ -300,6 +306,7 @@ class Trainer:
       command_cfg.initial_forward = min(command_cfg.initial_forward, cfg.max_forward)
       command_cfg.curriculum_steps = cfg.velocity_curriculum_iterations
       command_cfg.pure_side_fraction = cfg.pure_side_fraction
+      command_cfg.fast_straight_fraction = cfg.fast_straight_fraction
       if cfg.expert_policy:
         raise ValueError("Velocity training currently collects with its own actor; omit --expert-policy")
     else:

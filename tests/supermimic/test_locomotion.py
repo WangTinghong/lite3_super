@@ -363,6 +363,28 @@ def test_pure_side_sampling_retains_standing_and_covers_both_directions():
   torch.testing.assert_close(term.state[:, 3:6], torch.zeros(env.num_envs, 3))
 
 
+def test_fast_straight_sampling_preserves_the_side_and_standing_allocations():
+  from lite3_supermimic.locomotion.command import VelocityGaitCommandCfg
+
+  env = SimpleNamespace(num_envs=4096, device='cpu', scene={'robot': None},
+                        common_step_counter=7600)
+  cfg = VelocityGaitCommandCfg(resampling_time_range=(4., 8.), max_forward=.8,
+                               pure_side_fraction=.35, fast_straight_fraction=.25)
+  command = cfg.build(env)
+  with torch.random.fork_rng(devices=[]):
+    torch.manual_seed(42)
+    command.reset(torch.arange(env.num_envs))
+  vx, vy, yaw = command.state[:, :3].unbind(-1)
+  fast = vx >= .9
+  side = (vx == 0) & (vy.abs() == .1) & (yaw == 0)
+  stand = (vx == 0) & (vy == 0) & (yaw == 0)
+  assert ((vx[fast] <= 1.1) & (vy[fast] == 0) & (yaw[fast] == 0)).all()
+  assert vx[~fast].max() < .62
+  assert fast.float().mean().item() == pytest.approx(.8 * .25, abs=.025)
+  assert side.float().mean().item() == pytest.approx(.8 * .35, abs=.025)
+  assert stand.float().mean().item() == pytest.approx(.2, abs=.025)
+
+
 def test_velocity_evaluation_separates_the_initial_and_final_stop(monkeypatch):
   from unittest.mock import Mock
   from lite3_supermimic.locomotion.evaluation import VelocityEvaluation
