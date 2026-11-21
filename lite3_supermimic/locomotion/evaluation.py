@@ -52,6 +52,8 @@ class VelocityEvaluation:
       self.contact_order = [names.index(f"{leg}_{part}_collision")
                             for leg in LEGS for part in ("FOOT", "SHANK")]
       self.foot_contacts = []
+      self.foot_positions = []
+      self.foot_site_order = [st.FOOT_SITES.index(leg) for leg in LEGS]
     if acceleration_steps is not None:
       self.window_metrics = {name: self._empty_metrics() for name in ("acceleration", "steady_state")}
       self.heading_change = self.term.state.new_zeros(self.num_envs)
@@ -135,6 +137,8 @@ class VelocityEvaluation:
         if self.foot_contacts is not None:
           found = self.contact_sensor.data.found[:, self.contact_order]
           self.foot_contacts.append((found > 0).reshape(self.num_envs, len(LEGS), 2).any(dim=-1))
+          feet = st.limb_positions_w(env.scene["robot"])["feet"]
+          self.foot_positions.append(feet[:, self.foot_site_order, :2])
     if self.writer and self.step_index % self.video_stride == 0:
       self.writer.add_image(env.render())
     self.step_index += 1
@@ -155,6 +159,15 @@ class VelocityEvaluation:
     if self.foot_contacts and env_ids:
       contacts = torch.stack(self.foot_contacts, dim=0)[:, keep].cpu()
       result.update(summarize_footfalls(contacts, dt, start_s))
+      feet = torch.stack(self.foot_positions, dim=0)[:, keep].cpu()
+      stance = contacts[:-1] & contacts[1:]
+      speed = (feet[1:] - feet[:-1]).norm(dim=-1) / dt
+      totals = torch.where(stance, speed, 0.).sum(dim=(0, 1))
+      counts = stance.sum(dim=(0, 1))
+      result["stance_foot_speed_m_s_by_leg"] = {
+        leg: float(total / count) if count else None
+        for leg, total, count in zip(LEGS, totals, counts)
+      }
     return result
 
   def _summary(self, values):

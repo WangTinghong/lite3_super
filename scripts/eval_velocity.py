@@ -25,7 +25,7 @@ def main():
   forward.add_argument("--vx-sequence", type=float, nargs="+", help="Forward commands in m/s, in playback order.")
   ap.add_argument("--segment-seconds", type=float, default=5, help="Duration per speed command in a sequence.")
   ap.add_argument("--acceleration-seconds", type=float,
-                  help="Split a fixed straight run into acceleration and steady-state windows.")
+                  help="Split a fixed-command run into acceleration and steady-state windows.")
   ap.add_argument("--footfall-output", type=Path,
                   help="Save steady-state foot contact timing and pair metrics as JSON.")
   ap.add_argument("--step-height", type=float,
@@ -46,10 +46,10 @@ def main():
   if not all(math.isfinite(v) for v in (*forward_speeds, args.vy, args.yaw_rate)):
     ap.error("velocity commands must be finite")
   if args.acceleration_seconds is not None and (
-      args.vx is None or args.vx <= 0 or args.vy != 0 or args.yaw_rate != 0
+      args.vx is None
       or not math.isfinite(args.acceleration_seconds)
       or not 0 < args.acceleration_seconds < (60 if args.seconds is None else args.seconds)):
-    ap.error("--acceleration-seconds requires a positive fixed straight command and a split within the run")
+    ap.error("--acceleration-seconds requires a fixed --vx command and a split within the run")
   if args.footfall_output is not None and args.acceleration_seconds is None:
     ap.error("--footfall-output requires --acceleration-seconds")
   if args.step_height is not None and (

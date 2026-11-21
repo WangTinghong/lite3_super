@@ -169,6 +169,27 @@ def test_bound_pair_reward_prefers_matching_front_and_hind_contacts():
   assert torch.count_nonzero(height.grad[3]) == 0
 
 
+def test_turn_foot_penalties_target_dragging_and_missing_swing_in_both_directions():
+  command = initial_state(5, 'cpu')
+  command[:, 2] = command[:, 5] = torch.tensor([.35, -.35, .35, .35, 0.])
+  command[3, 0] = command[3, 3] = .35
+  command[:, 6] = .875
+  state = torch.zeros(5, st.STATE_DIM)
+  state[:, st.FEET.start + 2:st.FEET.stop:3] = st.FOOT_RADIUS
+  state[2, st.FEET.start + 2:st.FEET.stop:3] += .06
+  foot_velocity = torch.full((5, 4, 2), .12, requires_grad=True)
+  action = torch.zeros(5, 12)
+  terms = reward_terms(state, action, action, command, consts(5), GaitCfg(),
+                       foot_velocity_xy=foot_velocity)
+  for key in ('turn_contact_slip', 'turn_swing_clearance'):
+    cost = terms[key]
+    assert cost[0] == cost[1] > cost[2]
+    assert cost[3] == cost[4] == 0
+  terms['turn_contact_slip'].sum().backward()
+  assert torch.isfinite(foot_velocity.grad).all()
+  assert foot_velocity.grad[:2].abs().sum() > 0
+
+
 def test_footfall_summary_distinguishes_bound_and_trot_without_a_reference_clock():
   from lite3_supermimic.locomotion.footfalls import summarize_footfalls
 

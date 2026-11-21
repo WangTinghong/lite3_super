@@ -59,7 +59,13 @@ class LocomotionImagination(Imagination):
     pose_next = st.apply_pose_delta(pose, dpose)
     constants = st.RobotConsts(k["default_q"], k["action_scale"], self.c.kp,
                                self.c.kd, self.c.effort, k["soft_limits"])
-    terms = reward_terms(s_next, action, a_prev, command, constants, self.gait_cfg)
+    foot_velocity_xy = None
+    if self.cfg.weights.turn_contact_slip or self.cfg.weights.turn_swing_clearance:
+      previous_feet = st.limb_points_world(s, pose)["feet"][..., :2]
+      next_feet = st.limb_points_world(s_next, pose_next)["feet"][..., :2]
+      foot_velocity_xy = (next_feet - previous_feet) / dt.reshape(-1, 1, 1).clamp_min(1e-6)
+    terms = reward_terms(s_next, action, a_prev, command, constants, self.gait_cfg,
+                         foot_velocity_xy=foot_velocity_xy)
     death = self.fall_prob(s_next)
     # Clamping zeros the dynamics gradient outside the limits. This penalty
     # still pushes the actor's raw requests back into the executable range.

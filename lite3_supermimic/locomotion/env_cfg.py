@@ -15,13 +15,19 @@ from lite3_supermimic.supermimic import state as st
 
 def locomotion_reward(env):
   term = env.command_manager.get_term("velocity")
+  weights = env.cfg.commands["velocity"].reward_weights
   # Immutable action mapping is cached once, outside the simulation step loop.
   if not hasattr(term, "robot_consts"):
     term.robot_consts = st.robot_consts(env)
+  foot_velocity_xy = None
+  if weights.turn_contact_slip or weights.turn_swing_clearance:
+    if not hasattr(term, "foot_site_ids"):
+      term.foot_site_ids, _ = term.robot.find_sites(st.FOOT_SITES, preserve_order=True)
+    foot_velocity_xy = term.robot.data.site_lin_vel_w[:, term.foot_site_ids, :2]
   return weighted_reward(reward_terms(
     st.robot_state(env), env.action_manager.action, env.action_manager.prev_action,
-    term.state, term.robot_consts, term.cfg.gait,
-  ), env.cfg.commands["velocity"].reward_weights)
+    term.state, term.robot_consts, term.cfg.gait, foot_velocity_xy=foot_velocity_xy,
+  ), weights)
 
 
 def low_body(env):

@@ -41,7 +41,8 @@ class VelocityGaitCommand(CommandTerm):
     side_fraction = self.cfg.pure_side_fraction
     fast_fraction = self.cfg.fast_straight_fraction
     bound_fraction = self.cfg.bound_straight_fraction
-    if side_fraction or fast_fraction or bound_fraction:
+    turn_fraction = self.cfg.pure_turn_fraction
+    if side_fraction or fast_fraction or bound_fraction or turn_fraction:
       moving_sample = torch.rand(n, device=self.device)
       if side_fraction:
         side_step = ~standing & (moving_sample < side_fraction)
@@ -61,6 +62,12 @@ class VelocityGaitCommand(CommandTerm):
           target[straight_sample, 0] = speed[straight_sample]
           target[straight_sample, 1:] = 0.0
         lower = upper
+      if turn_fraction:
+        turn = ~standing & (moving_sample >= lower) & (moving_sample < lower + turn_fraction)
+        speed = torch.empty(n, device=self.device).uniform_(0.25, 0.45)
+        direction = torch.where(torch.rand(n, device=self.device) < 0.5, -1., 1.)
+        target[turn, :2] = 0.
+        target[turn, 2] = (speed * direction)[turn]
     target[standing] = 0
     self.state[env_ids, :3] = target
 
@@ -95,6 +102,7 @@ class VelocityGaitCommandCfg(CommandTermCfg):
   max_yaw: float = 0.8
   standing_fraction: float = 0.2
   pure_side_fraction: float = 0.0
+  pure_turn_fraction: float = 0.0
   fast_straight_fraction: float = 0.0
   fast_straight_min: float = 0.9
   fast_straight_max: float = 1.1
@@ -112,6 +120,9 @@ class VelocityGaitCommandCfg(CommandTermCfg):
     if not (0 <= self.bound_straight_fraction
             <= 1 - (self.pure_side_fraction + self.fast_straight_fraction)):
       raise ValueError("bound_straight_fraction must be nonnegative and fit in the remaining moving commands")
+    if not (0 <= self.pure_turn_fraction <= 1 - (
+        self.pure_side_fraction + self.fast_straight_fraction + self.bound_straight_fraction)):
+      raise ValueError("pure_turn_fraction must be nonnegative and fit in the remaining moving commands")
     if not 0 < self.fast_straight_min <= self.fast_straight_max < math.inf:
       raise ValueError("fast straight speeds must satisfy 0 < min <= max and be finite")
     if self.bound_straight_fraction and (

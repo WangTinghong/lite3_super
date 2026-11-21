@@ -20,6 +20,8 @@ class RewardWeights:
   gait_height: float = 1.0
   bound_pair_sync: float = 0.0
   bound_pair_timing: float = 0.0
+  turn_contact_slip: float = 0.0
+  turn_swing_clearance: float = 0.0
   vertical_velocity: float = -0.2
   tilt_rate: float = -0.03
   joint_deviation: float = -0.03
@@ -33,7 +35,7 @@ class RewardWeights:
   def upper_reward_rate(self) -> float:
     bounded_terms = {"track_velocity", "track_yaw", "upright", "base_height", "gait_height", "terminated",
                      "mid_straight_vx_error", "mid_straight_vy_error", "mid_straight_yaw_error",
-                     "bound_pair_sync", "bound_pair_timing"}
+                     "bound_pair_sync", "bound_pair_timing", "turn_contact_slip", "turn_swing_clearance"}
     # These terms are in [0, 1]. A positive weight on any other term may
     # make the reward unbounded, so only cap when the bound is valid.
     positive_terms = [term for term in fields(self) if getattr(self, term.name) > 0]
@@ -54,7 +56,7 @@ def bound_pair_errors(height, stance):
   return sync, timing
 
 
-def reward_terms(s, action, previous_action, command, consts, gait: GaitCfg):
+def reward_terms(s, action, previous_action, command, consts, gait: GaitCfg, *, foot_velocity_xy=None):
   target_velocity = command[:, :3]
   velocity = command[:, 3:6]
   planar_error = s[:, st.V_YAW][:, :2] - velocity[:, :2]
@@ -70,6 +72,16 @@ def reward_terms(s, action, previous_action, command, consts, gait: GaitCfg):
   height = st.feet_world_z(s) - st.FOOT_RADIUS
   bound_weight = (command[:, 10] == 2) * command[:, 9].square()
   pair_sync, pair_timing = bound_pair_errors(height, stance)
+  turn_slip = turn_clearance = torch.zeros_like(velocity[:, 2])
+  if foot_velocity_xy is not None:
+    turn = ((velocity[:, 2].abs() - 0.10) / 0.20).clamp(0., 1.)
+    turn = turn * ((target_velocity[:, :2].abs().amax(dim=-1) <= 1e-4)
+                   & (velocity[:, :2].norm(dim=-1) < 0.03))
+    support = torch.sigmoid((0.012 - height) / 0.006)
+    speed_error = -torch.expm1(-foot_velocity_xy.square().sum(-1) / 0.14**2)
+    turn_slip = turn * (support * speed_error).mean(-1)
+    clearance_shortfall = (swing_height.clamp(max=0.045) - height.clamp(min=0.)).clamp(0., 0.045)
+    turn_clearance = turn * (clearance_shortfall / 0.045).square().mean(-1)
   # Stance feet stay on the floor, swing feet follow the gait's clearance arc.
   height_error = (height - swing_height).square()
   moving = (velocity[:, :2].norm(dim=-1) + velocity[:, 2].abs()) > gait.stand_speed
@@ -93,6 +105,8 @@ def reward_terms(s, action, previous_action, command, consts, gait: GaitCfg):
     "gait_height": (torch.exp(-height_error / 0.0009) * (0.5 + 0.5 * stance)).mean(-1),
     "bound_pair_sync": bound_weight * pair_sync,
     "bound_pair_timing": bound_weight * pair_timing,
+    "turn_contact_slip": turn_slip,
+    "turn_swing_clearance": turn_clearance,
     "vertical_velocity": s[:, 6].square(),
     "tilt_rate": s[:, st.W_B][:, :2].square().sum(-1),
     "joint_deviation": joint_offset.square().sum(-1),
