@@ -1,6 +1,30 @@
 # Lite3 SuperMimic
 
-当前默认任务为 **Lite3-Velocity-Flat**，使用 SuperMimic 世界模型学习平地速度跟踪、零指令站立及 walk／trot／bound 步态切换。
+默认训练入口已切换至 [quadruped_lab 固定版本](https://github.com/kkmjj0721/quadruped_lab/tree/4e99c952b1d79eb9d3923c4ad116e41e55464437) 的 SuperMimic 框架。粗糙地形任务保留参考项目的上下楼梯、其他地形及难度课程。平地和粗糙地形分别使用 `Lite3-SuperMimic-Flat` 和 `Lite3-SuperMimic-Rough`。
+
+按照参考项目提供的环境配置，在 CUDA Linux 机器上从仓库根目录运行：
+
+```bash
+(cd quadruped_lab && bash setup.sh --torch-backend cu130)
+PYTHON="$PWD/quadruped_lab/.venv/bin/python" bash train_local.sh \
+  --device cuda:0 --num-envs 2048 --max-iterations 20000
+```
+
+训练默认写入 `quadruped_lab/logs/supermimic/lite3_supermimic/`。播放时保留 checkpoint 同目录的 `task_config.json`。
+
+```bash
+cd quadruped_lab
+.venv/bin/python scripts/play.py Lite3-SuperMimic-Rough \
+  --checkpoint-file '<运行目录>/model_20000.pt' --num-envs 1 --viewer native
+```
+
+关节观测、动作及 ONNX 导出使用 `FL, FR, HL, HR` 顺序，每条腿依次为 `HipX, HipY, Knee`。默认关节角为 `[0, -1.0, 1.8]` rad，动作缩放为 `0.25`。新模型使用混合专家历史编码器和基于 Lite3 MJCF 的结构化世界模型，需要从头训练。
+
+## 旧版训练说明
+
+以下命令用于历史 checkpoint。运行这些旧版 `train_local.sh` 示例时，须显式设置 `TASK=Lite3-Velocity-Flat`。
+
+旧版任务为 **Lite3-Velocity-Flat**，使用 SuperMimic 世界模型学习平地速度跟踪、零指令站立及 walk／trot／bound 步态切换。
 
 策略输入为五帧 IMU、关节状态、上次动作、速度指令和足端相位，共 270 维。按 yaw 坐标系跟踪前后／侧向速度和偏航角速度，输出 12 个关节位置动作。真实环境和想象训练共享同一套步态时钟及奖励函数。
 
