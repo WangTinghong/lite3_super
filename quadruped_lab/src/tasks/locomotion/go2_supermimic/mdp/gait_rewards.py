@@ -6,6 +6,7 @@ import math
 import torch
 
 from .state_spec import AIR_TIME, CONTACT, CONTACT_TIME, ELAPSED_TIME
+from .reference_state import FEET, HIPS
 
 
 def gait_phase(state, dt, period):
@@ -33,15 +34,27 @@ def gait_reward_terms(task, state, next_state):
     swing_score = (1 - (air_duration / swing_duration - 1).abs()).clamp_min(0)
     durations = desired * contact * stance_score + (1 - desired) * (1 - contact) * swing_score
     terms = {"foot_gait": matches.mean(-1) * active, "feet_air_time": durations.mean(-1) * active}
-    if task.cfg.reward.scales.swing_clearance_shortfall:
-        # 足端中心与半径 25 mm 的小腿碰撞端点重合。
-        clearance = task.feet_height(next_state.physical) - 0.025
+    scales = task.cfg.reward.scales
+    if scales.swing_clearance_shortfall or scales.front_reach_shortfall:
         swing = ((leg_phase - cfg.stance_fraction) / (1 - cfg.stance_fraction)).clamp(0., 1.)
-        arc = torch.sin(math.pi * swing).square()
-        shortfall = ((0.035 * arc - clearance) / 0.035).clamp(0., 2.)
         vx, vy, yaw = state.command.unbind(-1)
         straight_forward = ((vx - 0.2) / 0.2).clamp(0., 1.) * (vy.abs() <= 0.1) * (yaw.abs() <= 0.25)
+    if scales.swing_clearance_shortfall:
+        # 足端中心与半径 25 mm 的小腿碰撞端点重合。
+        clearance = task.feet_height(next_state.physical) - 0.025
+        arc = torch.sin(math.pi * swing).square()
+        target = cfg.swing_clearance_target
+        shortfall = ((target * arc - clearance) / target).clamp(0., 2.)
         terms["swing_clearance_shortfall"] = straight_forward * (arc * shortfall).mean(-1)
+    if scales.front_reach_shortfall:
+        physical = next_state.physical
+        reach = (physical[:, FEET] - physical[:, HIPS]).reshape(-1, 4, 3)[:, :2, 0]
+        late = ((swing[:, :2] - 0.5) * 2).clamp(0., 1.)
+        late_weight = torch.sin(math.pi * late).square()
+        # 按一半支撑期的前进距离确定前伸目标，并限制高速目标。
+        target = (0.5 * vx * stance_duration).clamp(0., 0.13)
+        shortfall = ((target[:, None] - reach) / 0.10).clamp(0., 2.)
+        terms["front_reach_shortfall"] = straight_forward * (late_weight * shortfall).mean(-1)
     return terms
 
 

@@ -267,6 +267,7 @@ class Go2ReferenceCfg(BaseConfig):
             command_threshold = 0.1
             contact_height = 0.035  # 指定参考train.py稀有窗口采用的足端中心触地阈值，米。
             contact_softness = 0.005  # 想象接触过渡宽度，米；属于本次软化适配。
+            swing_clearance_target = 0.035  # 摆动中点的小腿末端最低净空，米。
 
         class posture:
             walking_threshold = 0.1
@@ -285,6 +286,7 @@ class Go2ReferenceCfg(BaseConfig):
             foot_gait = 0.5
             feet_air_time = 0.2
             swing_clearance_shortfall = 0.0
+            front_reach_shortfall = 0.0
             pose = 0.5
             lin_vel_z = -2.0
             body_orientation_l2 = -0.2
