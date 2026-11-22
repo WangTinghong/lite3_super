@@ -1,6 +1,8 @@
 # Copyright (c) 2026-2027 zh
 """内容：实现指定HIM接触奖励及其已授权的想象软接触近似。"""
 
+import math
+
 import torch
 
 from .state_spec import AIR_TIME, CONTACT, CONTACT_TIME, ELAPSED_TIME
@@ -17,7 +19,8 @@ def gait_reward_terms(task, state, next_state):
     cfg = task.cfg.reward.gait
     phase = gait_phase(next_state, task.dt, cfg.period)
     offsets = task.gait_offsets
-    desired = ((phase[:, None] + offsets) % 1.0 < cfg.stance_fraction).to(phase.dtype)
+    leg_phase = (phase[:, None] + offsets) % 1.0
+    desired = (leg_phase < cfg.stance_fraction).to(phase.dtype)
     contact = next_state.memory[:, CONTACT]
     active = (state.command[:, :2].norm(dim=-1) + state.command[:, 2].abs() > cfg.command_threshold).to(phase.dtype)
     matches = desired * contact + (1 - desired) * (1 - contact)
@@ -29,7 +32,17 @@ def gait_reward_terms(task, state, next_state):
     stance_score = (1 - (contact_duration / stance_duration - 1).abs()).clamp_min(0)
     swing_score = (1 - (air_duration / swing_duration - 1).abs()).clamp_min(0)
     durations = desired * contact * stance_score + (1 - desired) * (1 - contact) * swing_score
-    return {"foot_gait": matches.mean(-1) * active, "feet_air_time": durations.mean(-1) * active}
+    terms = {"foot_gait": matches.mean(-1) * active, "feet_air_time": durations.mean(-1) * active}
+    if task.cfg.reward.scales.swing_clearance_shortfall:
+        # 足端中心与半径 25 mm 的小腿碰撞端点重合。
+        clearance = task.feet_height(next_state.physical) - 0.025
+        swing = ((leg_phase - cfg.stance_fraction) / (1 - cfg.stance_fraction)).clamp(0., 1.)
+        arc = torch.sin(math.pi * swing).square()
+        shortfall = ((0.035 * arc - clearance) / 0.035).clamp(0., 2.)
+        vx, vy, yaw = state.command.unbind(-1)
+        straight_forward = ((vx - 0.2) / 0.2).clamp(0., 1.) * (vy.abs() <= 0.1) * (yaw.abs() <= 0.25)
+        terms["swing_clearance_shortfall"] = straight_forward * (arc * shortfall).mean(-1)
+    return terms
 
 
 def posture_reward(task, state, next_state):

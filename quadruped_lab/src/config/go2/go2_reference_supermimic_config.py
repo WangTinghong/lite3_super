@@ -284,6 +284,7 @@ class Go2ReferenceCfg(BaseConfig):
             body_ang_vel = -0.05
             foot_gait = 0.5
             feet_air_time = 0.2
+            swing_clearance_shortfall = 0.0
             pose = 0.5
             lin_vel_z = -2.0
             body_orientation_l2 = -0.2
