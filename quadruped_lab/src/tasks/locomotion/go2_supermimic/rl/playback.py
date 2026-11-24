@@ -122,6 +122,7 @@ class SuperMimicPlayEnv:
         self.adapter = adapter
         self.command_manager = _PlaybackCommandManager(adapter)
         self.reward_manager = _PlaybackRewardManager(adapter)
+        self._command_provider = None
         self._observation = None
         self._history = None
 
@@ -139,7 +140,7 @@ class SuperMimicPlayEnv:
         state = self.adapter.reset(env_ids=env_ids)
         self.reward_manager.reset(state, env_ids)
         self.cfg.viewer.reward_bar_max_terms = len(self.reward_manager.rates)
-        frame = self.adapter.task.observe(state, noisy=False)
+        frame = self._observe(state)
         length = self.adapter.task.spec.history_length
         if env_ids is None or self._history is None:
             self._observation = frame
@@ -151,10 +152,26 @@ class SuperMimicPlayEnv:
 
     def _update_commands(self):
         """同步当前命令与最新观测，局部重置前也更新未重置环境的决策帧。"""
-        if self.command_manager.update() and self._history is not None:
+        if self._command_provider is None and self.command_manager.update() and self._history is not None:
             # 更新当前决策帧中的命令，保留旧历史帧，不额外推进历史时间。
             self._observation = self.adapter.task.observe(self.adapter.get_state(), noisy=False)
             self._history[:, -1] = self._observation
+
+    @torch.no_grad()
+    def set_command_provider(self, provider):
+        """由当前状态生成下一步播放指令，None 恢复常规播放指令来源。"""
+        if provider is None and self._command_provider is not None:
+            self.adapter.set_play_commands(None)
+        self._command_provider = provider
+        if self._history is not None:
+            self._observation = self._observe(self.adapter.get_state())
+            self._history[:, -1] = self._observation
+
+    def _observe(self, state):
+        if self._command_provider is not None:
+            self.adapter.set_play_commands(self._command_provider(state))
+            state = self.adapter.get_state()
+        return self.adapter.task.observe(state, noisy=False)
 
     def get_observations(self):
         if self._history is None:
@@ -168,7 +185,7 @@ class SuperMimicPlayEnv:
         before = self.adapter.get_state()
         result = self.adapter.step(actions)
         self.reward_manager.update(before, actions, result)
-        frame = self.adapter.task.observe(result.next_state, noisy=False)
+        frame = self._observe(result.next_state)
         history = append_history(self._history, frame)
         done = result.terminated | result.truncated
         if done.any():

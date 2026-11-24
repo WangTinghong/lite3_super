@@ -28,6 +28,7 @@ from src.tasks.locomotion.go2_supermimic.rl.transition_adapter import Go2Transit
 
 
 STAIRS = "pyramid_stairs_inv_3"
+STEERING_MODES = ("off", "heading", "centerline")
 FRONT_GEOMS = ("FL_FOOT_collision", "FR_FOOT_collision", "FL_SHANK_collision", "FR_SHANK_collision")
 TORSO_COLLISION = "TORSO_collision"
 TORSO_VISUAL = "TORSO_visual"
@@ -53,7 +54,22 @@ def stair_contacts(cfg, **kwargs):
     return env_cfg
 
 
-def reset_on(env, family, x, level=0, *, vx=0.30):
+def stair_commands(state, *, center_y, vx, steering):
+    """沿楼梯世界 +X 轴保持航向，按需限制相对踏面中心的横向漂移。"""
+    pose = state.physical[:, POSE]
+    yaw = pose[:, 2]
+    heading_error = yaw.sin().atan2(yaw.cos())
+    yaw_rate = (-1.5 * heading_error).clamp(-.30, .30)
+    lateral = torch.zeros_like(yaw_rate)
+    if steering == "centerline":
+        offset = pose[:, 1] - center_y
+        # 将轴向横移修正投影到机身侧向，留出 2 cm 的落足波动范围。
+        correction = -.65 * offset.sign() * (offset.abs() - .02).clamp_min(0.)
+        lateral = (correction * yaw.cos()).clamp(-.08, .08)
+    return torch.stack((torch.full_like(yaw_rate, vx), lateral, yaw_rate), dim=-1)
+
+
+def reset_on(env, family, x, level=0, *, vx=0.30, steering="off"):
     adapter = env.adapter
     column = adapter.map.family_names.index(family)
 
@@ -65,9 +81,15 @@ def reset_on(env, family, x, level=0, *, vx=0.30):
     adapter._set_origins = fixed_origins
     pose = adapter.raw_env.event_manager.get_term_cfg("reset_root").params["pose_range"]
     pose.update(x=(x, x), y=(0., 0.), yaw=(0., 0.))
+    env.set_command_provider(None)
     adapter.set_play_commands((vx, 0., 0.))
     torch.manual_seed(adapter.cfg.env.seed)
-    return env.reset()
+    obs = env.reset()
+    if steering != "off":
+        center_y = adapter.raw_env.scene.env_origins[:, 1].clone()
+        env.set_command_provider(partial(stair_commands, center_y=center_y, vx=vx, steering=steering))
+        obs = env.get_observations()
+    return obs
 
 
 def heading_change(initial_yaw, yaw, first, last, dt):
@@ -236,12 +258,12 @@ def torso_ascent_safety(trace, dt):
     }
 
 
-@torch.inference_mode()
-def rollout(env, policy, stairs, stair_level=0, start_x=0.65, *, vx=0.30):
+@torch.no_grad()
+def rollout(env, policy, stairs, stair_level=0, start_x=0.65, *, vx=0.30, steering="off"):
     adapter = env.adapter
     dt = adapter.step_dt
     obs = reset_on(env, STAIRS if stairs else "flat", start_x if stairs else 0.,
-                   stair_level if stairs else 0, vx=vx)
+                   stair_level if stairs else 0, vx=vx, steering=steering if stairs else "off")
     initial_yaw = adapter.task.yaw(adapter.get_state()).cpu()
     origin = adapter.raw_env.scene.env_origins[:, :2].clone()
     radius = adapter.map.size[0] * 0.5
@@ -253,13 +275,15 @@ def rollout(env, policy, stairs, stair_level=0, start_x=0.65, *, vx=0.30):
     front_indices = [sensor.primary_names.index(name) for name in FRONT_GEOMS]
     alive = torch.ones(adapter.num_envs, dtype=torch.bool, device=adapter.device)
     rows = []
+    lateral_rows = []
     timing_rows = []
     risk_rows = []
     slot_shape = (adapter.num_envs, len(sensor.primary_names), SLOTS)
     capture = nullcontext()
     if stairs:
         world_edge = origin[:, :1] + edge_x
-        tread_end = world_edge + adapter.map.generator.sub_terrains[STAIRS].step_width
+        step_width = adapter.map.generator.sub_terrains[STAIRS].step_width
+        tread_end = world_edge + step_width
         rear_sensor = adapter.raw_env.scene["feet_ground_contact"]
         rear_indices = [rear_sensor.primary_names.index(f"{leg}_FOOT_collision") for leg in ("HL", "HR")]
         torso_sensor = adapter.raw_env.scene["stair_torso_contacts"]
@@ -320,6 +344,7 @@ def rollout(env, policy, stairs, stair_level=0, start_x=0.65, *, vx=0.30):
             rows.append(torch.cat((alive[:, None], yaw[:, None], relative_x[:, None], on_top[:, None],
                                    per_geom[:, front_indices]), dim=1))
             if stairs:
+                lateral_rows.append(state.physical[:, POSE.start + 1] - origin[:, 1])
                 foot_positions = adapter.robot.data.site_pos_w[:, foot_ids[:2]]
                 edge_force = torch.where((contacts.pos[..., 0] - world_edge).abs() <= .03, riser, 0.)
                 support = ((contacts.found > 0) & (contacts.normal[..., 2].abs() > .70)
@@ -333,7 +358,8 @@ def rollout(env, policy, stairs, stair_level=0, start_x=0.65, *, vx=0.30):
                 ), dim=-1))
     timing = torch.stack(timing_rows).cpu() if timing_rows else None
     rows = torch.stack(rows).cpu()
-    result = summarize(rows, initial_yaw, dt, stairs, timing)
+    alignment_data = (torch.stack(lateral_rows).cpu(), (edge_x, edge_x + step_width), start_x) if stairs else None
+    result = summarize(rows, initial_yaw, dt, stairs, timing, alignment_data=alignment_data)
     if stairs:
         result["first_riser_local_x_m"] = edge_x
         result["sample_period_s"] = dt
@@ -390,7 +416,40 @@ def rollout(env, policy, stairs, stair_level=0, start_x=0.65, *, vx=0.30):
     return result
 
 
-def summarize(rows, initial_yaw, dt, stairs, timing=None):
+def alignment_window(lateral, heading):
+    """保留有符号末值和峰值，避免左右跑偏相互抵消。"""
+    if not lateral.numel():
+        return None
+    return {
+        "end_lateral_m": lateral[-1].item(),
+        "peak_abs_lateral_m": lateral.abs().max().item(),
+        "end_heading_deg": heading[-1].item(),
+        "peak_abs_heading_deg": heading.abs().max().item(),
+    }
+
+
+def ascent_alignment(trace, lateral, edges, start_x, dt):
+    yaw = trace[:, 1]
+    heading = torch.rad2deg(yaw.sin().atan2(yaw.cos()))
+    x = trace[:, 2]
+    # 按机身首次穿过两道立面的时刻划分，避免倒退后重复计入前一段。
+    boundaries = [0]
+    for edge in edges:
+        crossings = (x[boundaries[-1]:] >= edge).nonzero().flatten()
+        boundaries.append(boundaries[-1] + int(crossings[0]) if crossings.numel() else len(x))
+    boundaries.append(len(x))
+    phases = {}
+    for name, first, end in zip(("approach", "first_to_second_riser", "later_ascent"),
+                                boundaries[:-1], boundaries[1:], strict=True):
+        phases[name] = alignment_window(lateral[first:end], heading[first:end])
+    return {
+        **alignment_window(lateral, heading),
+        "mean_forward_mps": (x[-1].item() - start_x) / (len(x) * dt),
+        "phases": phases,
+    }
+
+
+def summarize(rows, initial_yaw, dt, stairs, timing=None, *, alignment_data=None):
     by_env = []
     for index, trace in enumerate(rows.transpose(0, 1)):
         valid = trace[trace[:, 0] > 0]
@@ -407,6 +466,10 @@ def summarize(rows, initial_yaw, dt, stairs, timing=None):
             stable = next(((first, end) for first, end in runs if (end - first) * dt >= TOP_HOLD_S), None)
             result["reached_top"] = stable is not None
             approach = valid[:stable[0]] if stable is not None else valid
+            if alignment_data is not None:
+                lateral, edges, start_x = alignment_data
+                count = stable[0] + 1 if stable is not None else len(valid)
+                result["alignment"] = ascent_alignment(valid[:count], lateral[:count, index], edges, start_x, dt)
             if timing is not None and len(approach):
                 result["first_riser"] = first_riser_metrics(timing[:len(approach), index], approach[:, 2], dt)
             result["riser_contact"] = {}
@@ -428,6 +491,16 @@ def summarize(rows, initial_yaw, dt, stairs, timing=None):
               "heading_windows": len(heading), "by_env": by_env}
     if stairs:
         result["reached_top"] = sum(row.get("reached_top", False) for row in by_env)
+        alignment = [row["alignment"] for row in by_env if "alignment" in row]
+        if alignment:
+            result["ascent_alignment"] = {
+                "measured_envs": len(alignment),
+                "median_abs_end_lateral_m": median(abs(r["end_lateral_m"]) for r in alignment),
+                "median_peak_abs_lateral_m": median(r["peak_abs_lateral_m"] for r in alignment),
+                "max_peak_abs_lateral_m": max(r["peak_abs_lateral_m"] for r in alignment),
+                "median_peak_abs_heading_deg": median(r["peak_abs_heading_deg"] for r in alignment),
+                "median_mean_forward_mps": median(r["mean_forward_mps"] for r in alignment),
+            }
         top_times = [row["top_entry_s"] for row in by_env if "top_entry_s" in row]
         result["median_top_entry_s"] = median(top_times) if top_times else None
         near_edge = [row["first_riser"] for row in by_env if "first_riser" in row]
@@ -461,7 +534,7 @@ def summarize(rows, initial_yaw, dt, stairs, timing=None):
     return result
 
 
-def evaluate(checkpoint, device, num_envs, stair_level=0, start_x=0.65, stairs_only=False, *, vx=0.30):
+def evaluate(checkpoint, device, num_envs, stair_level=0, start_x=0.65, stairs_only=False, *, vx=0.30, steering="off"):
     with patch.object(env_cfgs, "make_go2_supermimic_env_cfg", stair_contacts):
         env, policy = make_playback("Lite3-SuperMimic-Rough", checkpoint_file=checkpoint,
                                     device=device, num_envs=num_envs)
@@ -469,7 +542,8 @@ def evaluate(checkpoint, device, num_envs, stair_level=0, start_x=0.65, stairs_o
         if not 0 <= stair_level < env.adapter.map.rows:
             raise ValueError(f"Stair level must be between 0 and {env.adapter.map.rows - 1}")
         result = {"checkpoint": str(checkpoint), "stair_level": stair_level, "stair_start_x_m": start_x,
-                  "command_vx_mps": vx, "stairs": rollout(env, policy, True, stair_level, start_x, vx=vx)}
+                  "command_vx_mps": vx, "steering": steering,
+                  "stairs": rollout(env, policy, True, stair_level, start_x, vx=vx, steering=steering)}
         if not stairs_only:
             result["flat"] = rollout(env, policy, False, vx=vx)
         return result
@@ -486,6 +560,7 @@ def main():
     parser.add_argument("--stair-level", type=int, default=0)
     parser.add_argument("--start-x", type=float, default=0.65, help="Starting X offset on the stair tile (m).")
     parser.add_argument("--vx", type=float, default=0.30, help="Forward command in m/s.")
+    parser.add_argument("--steering", choices=STEERING_MODES, default="off")
     parser.add_argument("--stairs-only", action="store_true", help="Skip the flat-ground control run.")
     args = parser.parse_args()
     if args.num_envs < 1 or args.stair_level < 0 or not math.isfinite(args.start_x) or not math.isfinite(args.vx) or args.vx <= 0:
@@ -493,7 +568,7 @@ def main():
     with patch.object(robot, "get_spec", partial(robot.get_spec, shank_radius_m=0.021)):
         for checkpoint in (args.baseline, *args.candidates):
             report = evaluate(checkpoint, args.device, args.num_envs, args.stair_level, args.start_x, args.stairs_only,
-                              vx=args.vx)
+                              vx=args.vx, steering=args.steering)
             print(json.dumps(report, indent=2), flush=True)
 
 

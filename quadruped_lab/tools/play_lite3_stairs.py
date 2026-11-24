@@ -4,7 +4,7 @@
     在 MJLab 原生窗口回放 Lite3 检查点，固定楼梯等级、起点和前向速度。
 
 用法：
-    python tools/play_lite3_stairs.py /path/to/model_2500.pt --stair-level 5 --start-x 0.575 --vx 1.00
+    python tools/play_lite3_stairs.py /path/to/model_2500.pt --stair-level 5 --start-x 0.575 --vx 1.20 --steering centerline
 """
 
 import argparse
@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from mjlab.viewer import NativeMujocoViewer
 
 from src.tasks.locomotion.go2_supermimic.rl.playback import make_playback
-from tools.eval_lite3_stairs import STAIRS, reset_on
+from tools.eval_lite3_stairs import STAIRS, STEERING_MODES, reset_on
 
 
 def main():
@@ -26,6 +26,7 @@ def main():
     parser.add_argument("--stair-level", type=int, default=5)
     parser.add_argument("--start-x", type=float, default=0.575, help="Stair tile X offset in meters.")
     parser.add_argument("--vx", type=float, default=1.00, help="Forward command in m/s.")
+    parser.add_argument("--steering", choices=STEERING_MODES, default="off")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
     if args.stair_level < 0 or not math.isfinite(args.start_x) or not math.isfinite(args.vx) or args.vx <= 0.0:
@@ -35,7 +36,7 @@ def main():
     try:
         if args.stair_level >= env.adapter.map.rows:
             parser.error(f"Stair level must be between 0 and {env.adapter.map.rows - 1}.")
-        reset_on(env, STAIRS, args.start_x, args.stair_level, vx=args.vx)
+        reset_on(env, STAIRS, args.start_x, args.stair_level, vx=args.vx, steering=args.steering)
         NativeMujocoViewer(env, policy).run()
     finally:
         env.close()
