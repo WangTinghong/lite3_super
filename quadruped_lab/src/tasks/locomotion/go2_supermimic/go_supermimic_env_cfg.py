@@ -46,6 +46,9 @@ def validate_config(cfg: Go2ReferenceCfg) -> None:
         raise ValueError("The Go2 contact source must be height or model")
     if not isinstance(cfg.experiment.actor_phase, bool):
         raise ValueError("The Go2 actor phase flag must be boolean")
+    shank_radius = cfg.experiment.lite3_shank_collision_radius_m
+    if not math.isfinite(shank_radius) or shank_radius <= 0:
+        raise ValueError("Lite3 shank collision radius must be finite and positive")
     observation_dim = 47 if cfg.experiment.actor_phase else 45
     if (cfg.env.num_observations, cfg.env.num_obs) != (observation_dim, observation_dim * cfg.env.num_obs_history):
         raise ValueError("The Go2 observation dimensions must match the actor phase flag")

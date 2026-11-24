@@ -4,6 +4,7 @@ Inertials/axes/limits come from the existing deployment MJCF. Gains and action
 scale match Lite3_Stairs_config.py. Armature and latency are simulation assumptions,
 not identified Lite3 motor parameters. The DC torque-speed envelope is approximate.
 """
+from functools import partial
 from pathlib import Path
 import mujoco
 from mjlab.actuator import DcMotorActuatorCfg
@@ -11,22 +12,28 @@ from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
 from mjlab.utils.spec_config import CollisionCfg
 from .constants import (
     ACTION_SCALE, DAMPING, DEFAULT_JOINT_POS, EFFORT_LIMIT, FOOT_GEOM_NAMES,
-    STIFFNESS, VELOCITY_LIMIT,
+    LEGS, LEGACY_SHANK_COLLISION_RADIUS_M, STIFFNESS, VELOCITY_LIMIT,
 )
 
 LITE3_XML = Path(__file__).with_name("lite3.xml")
 LITE3_ACTION_SCALE = {".*_joint": ACTION_SCALE}
 
 
-def get_spec() -> mujoco.MjSpec:
-    return mujoco.MjSpec.from_file(str(LITE3_XML))
+def get_spec(*, shank_radius_m=LEGACY_SHANK_COLLISION_RADIUS_M) -> mujoco.MjSpec:
+    spec = mujoco.MjSpec.from_file(str(LITE3_XML))
+    if shank_radius_m != LEGACY_SHANK_COLLISION_RADIUS_M:
+        for leg in LEGS:
+            spec.geom(f"{leg}_SHANK_collision").size[0] = shank_radius_m
+    return spec
 
 
 def get_lite3_robot_cfg(cfg) -> EntityCfg:
     foot = r"[FH][LR]_FOOT_collision"
     collision = r".*_collision"
+    shank_radius = cfg.experiment.lite3_shank_collision_radius_m
     return EntityCfg(
-        spec_fn=get_spec,
+        spec_fn=(get_spec if shank_radius == LEGACY_SHANK_COLLISION_RADIUS_M else
+                 partial(get_spec, shank_radius_m=shank_radius)),
         init_state=EntityCfg.InitialStateCfg(
             pos=tuple(cfg.init_state.pos), joint_pos=dict(cfg.init_state.default_joint),
             joint_vel={".*": 0.0},

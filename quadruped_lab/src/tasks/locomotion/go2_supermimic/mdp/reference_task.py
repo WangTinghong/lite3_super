@@ -11,6 +11,7 @@ from torch import Tensor
 
 from agents.supermimic.config import RUNNER_RUNTIME_FIELDS
 from agents.supermimic.interfaces import AlgorithmSpec, TaskState
+from src.assets.robots.lite3.constants import LEGACY_SHANK_COLLISION_RADIUS_M
 
 from .reference_rewards import reference_reward_terms
 from .commands import advance_commands, heading_command, sample_commands
@@ -99,6 +100,9 @@ class Go2ReferenceTaskModel:
     def _semantic_config(self) -> dict:
         """以当前任务配置建立语义指纹，运行时预算不改变任务定义。"""
         config = self.cfg.to_dict()
+        experiment = config["experiment"]
+        if experiment["lite3_shank_collision_radius_m"] == LEGACY_SHANK_COLLISION_RADIUS_M:
+            experiment.pop("lite3_shank_collision_radius_m")
         reward = config["reward"]
         for name in ("swing_clearance_shortfall", "front_swing_clearance", "front_reach_shortfall",
                      "diagonal_contact_mismatch"):

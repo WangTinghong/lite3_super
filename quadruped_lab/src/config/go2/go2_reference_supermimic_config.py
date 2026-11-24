@@ -6,7 +6,7 @@ import math
 
 from agents.supermimic.config import SuperMimicConfig
 from src.config.base.base_config import BaseConfig
-from src.assets.robots.lite3.constants import JOINT_NAMES
+from src.assets.robots.lite3.constants import JOINT_NAMES, LEGACY_SHANK_COLLISION_RADIUS_M
 
 
 class Go2ReferenceCfg(BaseConfig):
@@ -91,6 +91,7 @@ class Go2ReferenceCfg(BaseConfig):
 
         contact_source = "model"  # 想象端默认使用受监督接触概率；height可显式选择足高近似对照。
         actor_phase = True  # 原45维末尾追加sin／cos，相位与步态奖励共用时钟。
+        lite3_shank_collision_radius_m = LEGACY_SHANK_COLLISION_RADIUS_M
 
     class sim:
         """平地和粗糙地形共用的仿真预算；物理步长以秒计。"""
