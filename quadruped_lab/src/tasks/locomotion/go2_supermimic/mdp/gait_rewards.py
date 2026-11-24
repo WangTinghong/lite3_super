@@ -40,27 +40,39 @@ def gait_reward_terms(task, state, next_state):
     durations = desired * contact * stance_score + (1 - desired) * (1 - contact) * swing_score
     terms = {"foot_gait": matches.mean(-1) * active, "feet_air_time": durations.mean(-1) * active}
     scales = task.cfg.reward.scales
-    if scales.swing_clearance_shortfall or scales.front_reach_shortfall or scales.diagonal_contact_mismatch:
+    if (scales.swing_clearance_shortfall or scales.front_swing_clearance or scales.front_reach_shortfall
+            or scales.diagonal_contact_mismatch):
         vx, vy, yaw = state.command.unbind(-1)
         straight_forward = ((vx - 0.2) / 0.2).clamp(0., 1.) * (vy.abs() <= 0.1) * (yaw.abs() <= 0.25)
     if scales.swing_clearance_shortfall or scales.front_reach_shortfall:
         swing = ((leg_phase - cfg.stance_fraction) / (1 - cfg.stance_fraction)).clamp(0., 1.)
-    if scales.diagonal_contact_mismatch:
-        # 台阶附近放宽同步约束，给跨沿脚保留调整落足时机的空间。
+    if scales.diagonal_contact_mismatch or scales.front_swing_clearance:
+        # 局部起伏增大时，逐步放宽平地步态约束。
         xy = next_state.physical[:, POSE][:, :2].detach()
         probes = xy.new_tensor(((0., 0.), (.4, 0.), (-.4, 0.), (0., .4), (0., -.4)))
         heights = task.surface_height(xy[:, None] + probes)
         relief = heights.amax(-1) - heights.amin(-1)
         flat = (1. - relief / 0.03).clamp(0., 1.)
+    if scales.diagonal_contact_mismatch:
         mismatch = (contact[:, _DIAGONAL_FIRST] - contact[:, _DIAGONAL_SECOND]).square().mean(-1)
         terms["diagonal_contact_mismatch"] = straight_forward * flat * mismatch
-    if scales.swing_clearance_shortfall:
+    if scales.swing_clearance_shortfall or scales.front_swing_clearance:
         # 足端中心与半径 25 mm 的小腿碰撞端点重合。
         clearance = task.feet_height(next_state.physical) - 0.025
+    if scales.swing_clearance_shortfall:
         arc = torch.sin(math.pi * swing).square()
         target = cfg.swing_clearance_target
         shortfall = ((target * arc - clearance) / target).clamp(0., 2.)
         terms["swing_clearance_shortfall"] = straight_forward * (arc * shortfall).mean(-1)
+    if scales.front_swing_clearance:
+        # 支撑时足端相对髋向后移动，向前摆时才奖励净空。
+        before = state.physical
+        after = next_state.physical
+        forward = ((after[:, FEET] - after[:, HIPS]) - (before[:, FEET] - before[:, HIPS]))
+        forward_speed = forward.reshape(-1, 4, 3)[:, :2, 0] / task.dt
+        swing_weight = (forward_speed / 0.6).clamp(0., 1.)
+        height_score = (clearance[:, :2] / cfg.swing_clearance_target).clamp(0., 1.)
+        terms["front_swing_clearance"] = straight_forward * flat * (height_score * swing_weight).mean(-1)
     if scales.front_reach_shortfall:
         physical = next_state.physical
         reach = (physical[:, FEET] - physical[:, HIPS]).reshape(-1, 4, 3)[:, :2, 0]

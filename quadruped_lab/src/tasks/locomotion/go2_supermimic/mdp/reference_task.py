@@ -100,7 +100,8 @@ class Go2ReferenceTaskModel:
         """以当前任务配置建立语义指纹，运行时预算不改变任务定义。"""
         config = self.cfg.to_dict()
         reward = config["reward"]
-        for name in ("swing_clearance_shortfall", "front_reach_shortfall", "diagonal_contact_mismatch"):
+        for name in ("swing_clearance_shortfall", "front_swing_clearance", "front_reach_shortfall",
+                     "diagonal_contact_mismatch"):
             if reward["scales"][name] == 0:
                 reward["scales"].pop(name)
         if reward["gait"]["swing_clearance_target"] == 0.035:

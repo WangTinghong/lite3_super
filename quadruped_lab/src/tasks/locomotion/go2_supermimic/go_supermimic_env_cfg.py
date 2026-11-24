@@ -60,6 +60,9 @@ def validate_config(cfg: Go2ReferenceCfg) -> None:
         weight = getattr(cfg.reward.scales, name)
         if not math.isfinite(weight) or weight > 0:
             raise ValueError(f"Reward weight must be finite and nonpositive: {name}")
+    front_clearance_weight = cfg.reward.scales.front_swing_clearance
+    if not math.isfinite(front_clearance_weight) or front_clearance_weight < 0:
+        raise ValueError("Front swing clearance reward weight must be finite and nonnegative")
     clearance = cfg.reward.gait.swing_clearance_target
     if not math.isfinite(clearance) or clearance <= 0:
         raise ValueError("Swing clearance target must be finite and positive")

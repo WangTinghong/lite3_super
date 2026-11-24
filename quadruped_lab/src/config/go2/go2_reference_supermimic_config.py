@@ -286,6 +286,7 @@ class Go2ReferenceCfg(BaseConfig):
             foot_gait = 0.5
             feet_air_time = 0.2
             swing_clearance_shortfall = 0.0
+            front_swing_clearance = 0.0
             front_reach_shortfall = 0.0
             diagonal_contact_mismatch = 0.0
             pose = 0.5
