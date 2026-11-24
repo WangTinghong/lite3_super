@@ -6,7 +6,7 @@ import torch
 from src.assets.robots.lite3.constants import FOOT_COLLISION_RADIUS_M
 
 from .reference_state import FEET, POSE, yaw_rotate_inverse
-from .state_spec import CONTACT
+from .state_spec import CONTACT, CONTACT_TIME
 
 
 def flat_ground_weight(task, physical):
@@ -18,7 +18,7 @@ def flat_ground_weight(task, physical):
 
 
 def front_riser_clearance_shortfall(task, state, next_state):
-    """用摆动前足的上方踏面估计净空，真实与想象共用。"""
+    """用前足的上方踏面估计净空，真实与想象共用。"""
     with torch.no_grad():
         yaw = task.yaw(state)
         front = state.physical[:, FEET].reshape(-1, 4, 3)[:, :2]
@@ -32,7 +32,20 @@ def front_riser_clearance_shortfall(task, state, next_state):
         riser = ((rise - 0.02) / 0.02).clamp(0., 1.)
         upper_tread = heights[..., 1:].amax(-1)
         # 用本步起点的接触判断摆动，保留第一次触碰立面当步的评分。
-        swing = (1. - state.memory[:, CONTACT][:, :2]).clamp(0., 1.)
+        contact = state.memory[:, CONTACT].clamp(0., 1.)
+        front_contact = contact[:, :2]
+        swing = 1. - front_contact
+        prelift = task.cfg.reward.front_riser_prelift_s
+        if prelift:
+            # 想象计时按接触概率加权，先恢复条件支撑时长。
+            stance_time = state.memory[:, CONTACT_TIME][:, :2] / front_contact.clamp_min(1e-6)
+            gait = task.cfg.reward.gait
+            stance_target = gait.period * gait.stance_fraction
+            ready = (1. - (stance_target - stance_time) / prelift).clamp(0., 1.)
+            other_contacts = contact.sum(-1, keepdim=True) - front_contact
+            support = (other_contacts / 2.).clamp(0., 1.)
+            # 支撑末段渐入，足端仍承重时至多使用一半摆动权重。
+            swing = swing + 0.5 * front_contact * ready * support
 
     sole_radius = max(FOOT_COLLISION_RADIUS_M, task.cfg.experiment.lite3_shank_collision_radius_m)
     front_z = next_state.physical[:, FEET].reshape(-1, 4, 3)[:, :2, 2]

@@ -253,6 +253,7 @@ class Go2ReferenceCfg(BaseConfig):
         tracking_angular_variance = 0.25
         flat_forward_velocity_error_scale = 0.10  # 平地前向速度误差归一化尺度，米每秒。
         front_riser_clearance_margin = 0.008  # 跨上升立面时相对新踏面的足底余量，米。
+        front_riser_prelift_s = 0.0  # 前足接近立面时提前评分的支撑末段时长，秒。
         pose_tracking_gate = True  # 移动时以实际速度跟踪门控姿态奖励；站立保留原评分。
         fall_angle = math.radians(70)
         fall_softness_deg = 5.0

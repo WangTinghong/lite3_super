@@ -114,6 +114,9 @@ def validate_config(cfg: Go2ReferenceCfg) -> None:
         cfg.reward.gait.contact_softness, cfg.reward.gait.command_threshold,
     )) or set(cfg.reward.gait.offsets) != set(FOOT_NAMES):
         raise ValueError("Gait parameters must be finite and define every foot by name")
+    prelift = cfg.reward.front_riser_prelift_s
+    if not 0 <= prelift <= cfg.reward.gait.period * cfg.reward.gait.stance_fraction:
+        raise ValueError("Front riser prelift window must lie between zero and the nominal stance duration")
     command_ranges = (*cfg.commands.initial_ranges, cfg.commands.heading_range, cfg.commands.resampling_time)
     if len(cfg.commands.initial_ranges) != 3 or any(
         len(bounds) != 2 or not all(math.isfinite(value) for value in bounds) or bounds[0] > bounds[1]

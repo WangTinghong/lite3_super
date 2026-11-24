@@ -119,6 +119,8 @@ class Go2ReferenceTaskModel:
             if reward["scales"][name] == 0:
                 reward["scales"].pop(name)
                 reward.pop(parameter)
+        if not reward["scales"].get("front_riser_clearance_shortfall") or reward["front_riser_prelift_s"] == 0:
+            reward.pop("front_riser_prelift_s")
         if reward["gait"]["swing_clearance_target"] == 0.035:
             reward["gait"].pop("swing_clearance_target")
         config["runner"] = {name: value for name, value in config["runner"].items() if name not in RUNNER_RUNTIME_FIELDS}
