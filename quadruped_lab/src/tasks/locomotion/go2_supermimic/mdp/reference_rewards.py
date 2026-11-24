@@ -10,6 +10,7 @@ from .reference_state import (
 )
 from .state_spec import CONTACT, CONTACT_TIME, PREVIOUS_ACTION, PREVIOUS_PREVIOUS_ACTION
 from .gait_rewards import gait_reward_terms, posture_reward
+from .terrain_rewards import terrain_reward_terms
 
 
 def reference_reward_terms(task, state, action, next_state, failure):
@@ -69,6 +70,7 @@ def reference_reward_terms(task, state, action, next_state, failure):
         terms["soft_landing"] = (force.norm(dim=-1) * first_contact * contact).sum(-1) * (
             command_magnitude > cfg.soft_landing_command_threshold)
     terms.update(gait_reward_terms(task, state, next_state))
+    terms.update(terrain_reward_terms(task, state, next_state, velocity))
     terms["pose"] = posture_reward(task, state, next_state)
     if cfg.pose_tracking_gate:
         linear_target = state.command[:, :2].square().sum(-1)

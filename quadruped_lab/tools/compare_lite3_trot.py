@@ -9,6 +9,7 @@
 
 import argparse
 import json
+import math
 import sys
 from itertools import pairwise
 from pathlib import Path
@@ -59,7 +60,7 @@ def median_or_none(values):
 
 
 @torch.inference_mode()
-def compare(checkpoint, device, num_envs):
+def compare(checkpoint, device, num_envs, vx_mps=VX_MPS):
     env, policy = make_playback("Lite3-SuperMimic-Rough", checkpoint_file=checkpoint,
                                 device=device, num_envs=num_envs)
     try:
@@ -76,7 +77,7 @@ def compare(checkpoint, device, num_envs):
         pose.update(x=(0., 0.), y=(0., 0.), yaw=(0., 0.))
         sensor = adapter.raw_env.scene["leg_ground_contact"]
         shank_columns = [sensor.primary_names.index(f"{leg}_SHANK_collision") for leg in FOOT_NAMES]
-        adapter.set_play_commands((VX_MPS, 0., 0.))
+        adapter.set_play_commands((vx_mps, 0., 0.))
         obs = env.reset()
         dt = adapter.step_dt
         valid = torch.ones(num_envs, dtype=torch.bool, device=adapter.device)
@@ -102,13 +103,13 @@ def compare(checkpoint, device, num_envs):
     finally:
         env.close()
 
-    report, events = summarize(rows, dt)
+    report, events = summarize(rows, dt, vx_mps)
     report["checkpoint"] = events["checkpoint"] = str(checkpoint)
     report["envs_with_fall"] = count_falls
     return report, events
 
 
-def summarize(rows, dt):
+def summarize(rows, dt, vx_mps=VX_MPS):
     legs = {leg: {"foot_swings": 0, "short_foot_swings": 0, "swings_with_shank_contact": 0,
                   "sustained_swings": 0, "clearance_mm": [], "reach_mm": [], "stride_mm": [], "cycle_s": []}
             for leg in FOOT_NAMES}
@@ -165,8 +166,9 @@ def summarize(rows, dt):
 
     speeds = rows[..., 1][rows[..., 0].bool()]
     report = {
-        "target_vx_mps": VX_MPS,
+        "target_vx_mps": vx_mps,
         "actual_vx_mps": float(speeds.mean()) if speeds.numel() else None,
+        "vx_rmse_mps": float((speeds - vx_mps).square().mean().sqrt()) if speeds.numel() else None,
         "valid_frames": valid_count,
         "feet": {leg: {key: median_or_none(value) if isinstance(value, list) else value
                        for key, value in stats.items()} for leg, stats in legs.items()},
@@ -187,13 +189,16 @@ if __name__ == "__main__":
     parser.add_argument("checkpoints", type=Path, nargs="+")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--num-envs", type=int, default=8)
+    parser.add_argument("--vx", type=float, default=VX_MPS, help="Forward command in m/s.")
     parser.add_argument("--events", type=Path, help="Path for individual liftoff and touchdown timestamps.")
     args = parser.parse_args()
     if args.num_envs < 1:
         parser.error("--num-envs must be positive")
+    if not math.isfinite(args.vx) or args.vx <= 0:
+        parser.error("--vx must be finite and positive")
     all_events = []
     for checkpoint in args.checkpoints:
-        report, events = compare(checkpoint, args.device, args.num_envs)
+        report, events = compare(checkpoint, args.device, args.num_envs, args.vx)
         print(json.dumps(report, indent=2), flush=True)
         all_events.append(events)
     if args.events is not None:

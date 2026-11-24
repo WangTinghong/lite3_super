@@ -10,4 +10,5 @@ EFFORT_LIMIT = 30.0  # Nm, local Lite3 URDF
 VELOCITY_LIMIT = 20.0  # rad/s, local Lite3 URDF
 ACTION_SCALE = 0.25
 FOOT_GEOM_NAMES = tuple(f"{leg}_FOOT_collision" for leg in ("FR", "FL", "HR", "HL"))
+FOOT_COLLISION_RADIUS_M = 0.022
 LEGACY_SHANK_COLLISION_RADIUS_M = 0.025

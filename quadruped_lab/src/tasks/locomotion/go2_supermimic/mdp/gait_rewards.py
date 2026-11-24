@@ -6,7 +6,8 @@ import math
 import torch
 
 from .state_spec import AIR_TIME, CONTACT, CONTACT_TIME, ELAPSED_TIME, FOOT_NAMES
-from .reference_state import FEET, HIPS, POSE
+from .reference_state import FEET, HIPS
+from .terrain_rewards import flat_ground_weight
 
 
 DIAGONAL_PAIRS = (("FL", "HR"), ("FR", "HL"))
@@ -47,12 +48,7 @@ def gait_reward_terms(task, state, next_state):
     if scales.swing_clearance_shortfall or scales.front_reach_shortfall:
         swing = ((leg_phase - cfg.stance_fraction) / (1 - cfg.stance_fraction)).clamp(0., 1.)
     if scales.diagonal_contact_mismatch or scales.front_swing_clearance:
-        # 局部起伏增大时，逐步放宽平地步态约束。
-        xy = next_state.physical[:, POSE][:, :2].detach()
-        probes = xy.new_tensor(((0., 0.), (.4, 0.), (-.4, 0.), (0., .4), (0., -.4)))
-        heights = task.surface_height(xy[:, None] + probes)
-        relief = heights.amax(-1) - heights.amin(-1)
-        flat = (1. - relief / 0.03).clamp(0., 1.)
+        flat = flat_ground_weight(task, next_state.physical)
     if scales.diagonal_contact_mismatch:
         mismatch = (contact[:, _DIAGONAL_FIRST] - contact[:, _DIAGONAL_SECOND]).square().mean(-1)
         terms["diagonal_contact_mismatch"] = straight_forward * flat * mismatch

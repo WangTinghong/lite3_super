@@ -251,6 +251,8 @@ class Go2ReferenceCfg(BaseConfig):
         body_ang_vel_frame = "body"  # 默认按HIM约束机身系xy角速度；heading可显式用于对照。
         tracking_linear_variance = 0.25
         tracking_angular_variance = 0.25
+        flat_forward_velocity_error_scale = 0.10  # 平地前向速度误差归一化尺度，米每秒。
+        front_riser_clearance_margin = 0.008  # 跨上升立面时相对新踏面的足底余量，米。
         pose_tracking_gate = True  # 移动时以实际速度跟踪门控姿态奖励；站立保留原评分。
         fall_angle = math.radians(70)
         fall_softness_deg = 5.0
@@ -282,6 +284,8 @@ class Go2ReferenceCfg(BaseConfig):
         class scales:
             track_linear_velocity = 2.0
             track_angular_velocity = 2.0
+            flat_forward_velocity_error = 0.0
+            front_riser_clearance_shortfall = 0.0
             is_terminated = -100.0  # 失败终止奖励率；想象端使用软失败概率，正常超时不罚。
             action_rate_l2 = -0.1
             joint_pos_limits = -10.0

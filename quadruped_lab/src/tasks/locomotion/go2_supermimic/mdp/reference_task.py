@@ -112,6 +112,13 @@ class Go2ReferenceTaskModel:
                      "diagonal_contact_mismatch"):
             if reward["scales"][name] == 0:
                 reward["scales"].pop(name)
+        for name, parameter in (
+            ("flat_forward_velocity_error", "flat_forward_velocity_error_scale"),
+            ("front_riser_clearance_shortfall", "front_riser_clearance_margin"),
+        ):
+            if reward["scales"][name] == 0:
+                reward["scales"].pop(name)
+                reward.pop(parameter)
         if reward["gait"]["swing_clearance_target"] == 0.035:
             reward["gait"].pop("swing_clearance_target")
         config["runner"] = {name: value for name, value in config["runner"].items() if name not in RUNNER_RUNTIME_FIELDS}

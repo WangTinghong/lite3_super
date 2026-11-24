@@ -59,7 +59,8 @@ def validate_config(cfg: Go2ReferenceCfg) -> None:
         raise ValueError("Linear velocity tracking frame must be body or heading")
     if cfg.reward.body_ang_vel_frame not in ("body", "heading"):
         raise ValueError("Body angular velocity penalty frame must be body or heading")
-    for name in ("swing_clearance_shortfall", "front_reach_shortfall", "diagonal_contact_mismatch"):
+    for name in ("swing_clearance_shortfall", "front_reach_shortfall", "diagonal_contact_mismatch",
+                 "flat_forward_velocity_error", "front_riser_clearance_shortfall"):
         weight = getattr(cfg.reward.scales, name)
         if not math.isfinite(weight) or weight > 0:
             raise ValueError(f"Reward weight must be finite and nonpositive: {name}")
@@ -69,6 +70,10 @@ def validate_config(cfg: Go2ReferenceCfg) -> None:
     clearance = cfg.reward.gait.swing_clearance_target
     if not math.isfinite(clearance) or clearance <= 0:
         raise ValueError("Swing clearance target must be finite and positive")
+    for name in ("flat_forward_velocity_error_scale", "front_riser_clearance_margin"):
+        value = getattr(cfg.reward, name)
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"Reward parameter must be finite and positive: {name}")
     for name in ("angular_momentum", "hip_pos", "soft_landing"):
         value = getattr(cfg.reward.scales, name)
         if not math.isfinite(value) or value > 0:
