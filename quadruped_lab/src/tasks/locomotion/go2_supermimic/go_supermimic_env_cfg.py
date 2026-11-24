@@ -115,9 +115,16 @@ def validate_config(cfg: Go2ReferenceCfg) -> None:
         for bounds in command_ranges
     ):
         raise ValueError("Command ranges must be finite and ordered pairs")
-    for value in (cfg.commands.rel_standing_envs, cfg.commands.rel_forward_envs):
+    for value in (cfg.commands.rel_standing_envs, cfg.commands.rel_forward_envs,
+                  cfg.commands.rel_fixed_straight_envs):
         if not 0 <= value <= 1:
             raise ValueError("Command mode probabilities must be in [0,1]")
+    straight_speed = cfg.commands.fixed_straight_speed
+    if not math.isfinite(straight_speed) or straight_speed <= 0:
+        raise ValueError("Fixed straight speed must be finite and positive")
+    forward_min, forward_max = cfg.commands.initial_ranges[0]
+    if cfg.commands.rel_fixed_straight_envs and not forward_min <= straight_speed <= forward_max:
+        raise ValueError("Fixed straight speed must lie in the forward command range")
     if len(cfg.commands.resampling_time) != 2 or not 0 < cfg.commands.resampling_time[0] <= cfg.commands.resampling_time[1]:
         raise ValueError("Command resampling times must be positive and ordered")
 

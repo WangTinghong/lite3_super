@@ -116,6 +116,7 @@ def format_training_log(metrics: Mapping[str, Real], *, num_envs: int, device) -
     for label, key, count in (
         ("Metrics/failures", "failures", True), ("Metrics/timeouts", "timeouts", True),
         ("Metrics/terrain_level", "task/terrain_level", False),
+        ("Metrics/fixed_straight_fraction", "task/fixed_straight_fraction", False),
     ):
         if key in values:
             lines.append(row(label, number(key, count=count)))

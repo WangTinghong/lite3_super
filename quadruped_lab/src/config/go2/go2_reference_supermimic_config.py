@@ -241,6 +241,8 @@ class Go2ReferenceCfg(BaseConfig):
         rel_heading_envs = 1.0
         rel_standing_envs = 0.1
         rel_forward_envs = 0.05
+        rel_fixed_straight_envs = 0.0  # 行走指令窗口中固定低速直行的比例。
+        fixed_straight_speed = 0.30  # 固定直行的机身前向速度，米每秒。
 
     class reward:
         """机体系平移及指定HIM奖励；各项先返回奖励率。"""

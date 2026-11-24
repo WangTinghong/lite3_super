@@ -28,7 +28,7 @@ from .reference_state import (
 from .state_spec import (
     COMMAND_TIMER, CONTEXT_ENCODER_BIAS,
     FOOT_NAMES, PREVIOUS_ACTION, PREVIOUS_PREVIOUS_ACTION, ELAPSED_TIME, AIR_TIME, CONTACT, CONTACT_TIME, COMMAND_OVERRIDE,
-    HEADING_TARGET, STANDING, FORWARD, MEMORY_DIM, JOINT_NAMES,
+    HEADING_TARGET, STANDING, COMMAND_MODE, MEMORY_DIM, JOINT_NAMES,
 )
 
 
@@ -103,6 +103,10 @@ class Go2ReferenceTaskModel:
         experiment = config["experiment"]
         if experiment["lite3_shank_collision_radius_m"] == LEGACY_SHANK_COLLISION_RADIUS_M:
             experiment.pop("lite3_shank_collision_radius_m")
+        commands = config["commands"]
+        if commands["rel_fixed_straight_envs"] == 0:
+            commands.pop("rel_fixed_straight_envs")
+            commands.pop("fixed_straight_speed")
         reward = config["reward"]
         for name in ("swing_clearance_shortfall", "front_swing_clearance", "front_reach_shortfall",
                      "diagonal_contact_mismatch"):
@@ -210,7 +214,7 @@ class Go2ReferenceTaskModel:
         heading_error = state.memory[:, HEADING_TARGET] - self.yaw(state)
         task_features = torch.cat((phase.sin()[:, None], phase.cos()[:, None],
                                    heading_error.sin()[:, None], heading_error.cos()[:, None],
-                                   state.memory[:, STANDING:FORWARD + 1], state.memory[:, CONTACT],
+                                   state.memory[:, STANDING:COMMAND_MODE + 1], state.memory[:, CONTACT],
                                    state.memory[:, AIR_TIME], state.memory[:, CONTACT_TIME],
                                    state.memory[:, COMMAND_OVERRIDE, None], state.memory[:, PREVIOUS_PREVIOUS_ACTION]), -1)
         # 来源critic的relief不对位置／航向求导，但机身高度仍属于价值导数。
@@ -238,13 +242,13 @@ class Go2ReferenceTaskModel:
 
     def initialize_state(self, physical: Tensor, context: Tensor) -> TaskState:
         """重置命令及全部确定性记忆；接触计时与来源传感器一样从零开始。"""
-        command, timer, heading, standing, forward = sample_commands(self.cfg.commands, context, physical[:, 72])
+        command, timer, heading, standing, mode = sample_commands(self.cfg.commands, context, physical[:, 72])
         memory = physical.new_zeros((physical.shape[0], MEMORY_DIM))
         memory[:, COMMAND_TIMER] = timer
         memory[:, HEADING_TARGET] = heading
         memory[:, STANDING] = standing
-        memory[:, FORWARD] = forward
-        command = heading_command(self.cfg.commands, command, physical[:, 72], heading, standing)
+        memory[:, COMMAND_MODE] = mode
+        command = heading_command(self.cfg.commands, command, physical[:, 72], heading, standing, mode)
         return TaskState(physical, memory, command, context)
 
     def feet_height(self, physical):
@@ -259,7 +263,7 @@ class Go2ReferenceTaskModel:
     def advance(self, state: TaskState, action: Tensor, next_physical: Tensor, *, contact_times=None) -> TaskState:
         """真实端读取子步计时；想象端默认使用受监督接触概率。"""
         clock = state.memory[:, ELAPSED_TIME] + self.dt
-        command, timer, heading, standing, forward = advance_commands(self.cfg.commands, state, next_physical, self.dt)
+        command, timer, heading, standing, mode = advance_commands(self.cfg.commands, state, next_physical, self.dt)
         if contact_times is None:
             gait = self.cfg.reward.gait
             contact = (next_physical[:, CONTACT_FOUND] if self.cfg.experiment.contact_source == "model" else
@@ -274,7 +278,7 @@ class Go2ReferenceTaskModel:
             air_time, contact_time = contact_times
             contact = (contact_time > 0).to(next_physical.dtype)
         memory = torch.cat((action, clock[:, None], timer[:, None], heading[:, None],
-                            standing.to(action.dtype)[:, None], forward.to(action.dtype)[:, None], contact,
+                            standing.to(action.dtype)[:, None], mode.to(action.dtype)[:, None], contact,
                             air_time, contact_time, state.memory[:, COMMAND_OVERRIDE, None],
                             state.memory[:, PREVIOUS_ACTION]), -1)
         return TaskState(next_physical, memory, command, state.context)

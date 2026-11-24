@@ -18,7 +18,7 @@ from ..mdp.curriculums import CommandCurriculum, TerrainCurriculum
 from ..mdp.state_spec import (
     ACTION_DIM, COMMAND_TIMER, CONTEXT_DIM, CONTEXT_ENCODER_BIAS, CONTEXT_FRICTION,
     CONTEXT_ORIGIN, CONTEXT_RANGES, CONTEXT_ZERO_PROBABILITY, JOINT_NAMES,
-    COMMAND_OVERRIDE,
+    COMMAND_MODE, COMMAND_OVERRIDE, FIXED_STRAIGHT_MODE,
 )
 from ..mdp.reference_task import Go2ReferenceTaskModel
 from ..mdp.reference_state import ANGULAR_BODY, CONTEXT_COM
@@ -226,6 +226,9 @@ class Go2TransitionAdapter:
                                  base_height=self.task.physical_features(final)[:, 0].mean(),
                                  # 参考 train.py:406 的诊断量：机体系偏航角速度超过 3 rad/s 的比例，用于发现打转。
                                  fast_yaw=(final.physical[:, ANGULAR_BODY][:, 2].abs() > 3.0).float().mean())
+        if self.cfg.commands.rel_fixed_straight_envs:
+            self.last_metrics["fixed_straight_fraction"] = (
+                (before.memory[:, COMMAND_MODE] == FIXED_STRAIGHT_MODE).float().mean())
         return EnvStep(final, self._state.detached_clone(), reward, terminated, truncated, versions)
 
     # ---------- 课程持久化与资源释放 ----------
