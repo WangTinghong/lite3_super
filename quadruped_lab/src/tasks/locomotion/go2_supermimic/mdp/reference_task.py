@@ -109,9 +109,14 @@ class Go2ReferenceTaskModel:
         if commands["rel_fixed_straight_envs"] == 0:
             commands.pop("rel_fixed_straight_envs")
             commands.pop("fixed_straight_speed")
+        if commands["high_stair_straight_fraction"] == 0:
+            commands.pop("high_stair_straight_fraction")
+            commands.pop("high_stair_straight_speeds")
+            commands.pop("high_stair_straight_seconds")
         reward = config["reward"]
         for name in ("swing_clearance_shortfall", "front_swing_clearance", "front_reach_shortfall",
-                     "diagonal_contact_mismatch"):
+                     "diagonal_contact_mismatch", "first_riser_swing_shortfall", "first_riser_body_shortfall",
+                     "next_tread_front_foot_shortfall", "next_tread_body_shortfall"):
             if reward["scales"][name] == 0:
                 reward["scales"].pop(name)
         for name, parameter in (

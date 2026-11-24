@@ -34,6 +34,18 @@ def validate_config(cfg: Go2ReferenceCfg) -> None:
         raise ValueError("Velocity curriculum is disabled for the HIM adaptation")
     if not 0.0 <= cfg.terrain.high_stair_fraction <= 1.0:
         raise ValueError("High stair training fraction must lie in [0, 1]")
+    straight_fraction = cfg.commands.high_stair_straight_fraction
+    if not 0.0 <= straight_fraction <= 1.0:
+        raise ValueError("High stair straight command fraction must lie in [0, 1]")
+    if straight_fraction:
+        if cfg.terrain.mode != "rough" or not cfg.terrain.high_stair_fraction:
+            raise ValueError("High stair straight commands require fixed L4/L5 terrain allocation")
+        speeds = cfg.commands.high_stair_straight_speeds
+        low, high = cfg.commands.initial_ranges[0]
+        if not speeds or not all(math.isfinite(v) and v > 0.0 and low <= v <= high for v in speeds):
+            raise ValueError("High stair straight speeds must be positive and within the forward command range")
+        if not 0.0 < cfg.commands.high_stair_straight_seconds <= cfg.env.episode_length_s:
+            raise ValueError("High stair straight duration must be positive and within the episode")
     if isinstance(cfg.env.num_envs, bool) or not isinstance(cfg.env.num_envs, int) or cfg.env.num_envs < 1:
         raise ValueError("Environment count must be a positive integer")
     if not math.isfinite(cfg.env.episode_length_s) or cfg.env.episode_length_s <= 0:
@@ -62,7 +74,8 @@ def validate_config(cfg: Go2ReferenceCfg) -> None:
     if cfg.reward.body_ang_vel_frame not in ("body", "heading"):
         raise ValueError("Body angular velocity penalty frame must be body or heading")
     for name in ("swing_clearance_shortfall", "front_reach_shortfall", "diagonal_contact_mismatch",
-                 "flat_forward_velocity_error", "front_riser_clearance_shortfall"):
+                 "flat_forward_velocity_error", "front_riser_clearance_shortfall", "first_riser_swing_shortfall",
+                 "first_riser_body_shortfall", "next_tread_front_foot_shortfall", "next_tread_body_shortfall"):
         weight = getattr(cfg.reward.scales, name)
         if not math.isfinite(weight) or weight > 0:
             raise ValueError(f"Reward weight must be finite and nonpositive: {name}")
@@ -82,7 +95,7 @@ def validate_config(cfg: Go2ReferenceCfg) -> None:
             raise ValueError(f"Reward weight must be finite and nonpositive: {name}")
         if critic_dimensions != (262, 262) and value != 0:
             raise ValueError("The new HIM rewards require a 262-observation task configuration")
-    for name in ("stumble", "joint_torques_l2"):
+    for name in ("stumble", "joint_torques_l2", "next_tread_front_foot_shortfall"):
         value = getattr(cfg.reward.scales, name)
         if not math.isfinite(value) or value > 0:
             raise ValueError(f"Reward weight must be finite and nonpositive: {name}")

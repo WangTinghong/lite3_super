@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import torch
 from mjlab.envs import ManagerBasedRlEnv
+from mjlab.envs.mdp import reset_root_state_uniform
 
 from agents.supermimic.interfaces import EnvStep, TaskState
 
@@ -18,7 +19,7 @@ from ..mdp.curriculums import CommandCurriculum, TerrainCurriculum
 from ..mdp.state_spec import (
     ACTION_DIM, COMMAND_TIMER, CONTEXT_DIM, CONTEXT_ENCODER_BIAS, CONTEXT_FRICTION,
     CONTEXT_ORIGIN, CONTEXT_RANGES, CONTEXT_ZERO_PROBABILITY, JOINT_NAMES,
-    COMMAND_MODE, COMMAND_OVERRIDE, FIXED_STRAIGHT_MODE,
+    COMMAND_MODE, COMMAND_OVERRIDE, ELAPSED_TIME, FIXED_STRAIGHT_MODE, HEADING_TARGET, STANDING,
 )
 from ..mdp.reference_task import Go2ReferenceTaskModel
 from ..mdp.reference_state import ANGULAR_BODY, CONTEXT_COM
@@ -42,6 +43,8 @@ class Go2TransitionAdapter:
         self.map = TerrainMap(self.cfg.terrain)
         factory = unitree_go2_flat_env_cfg if self.cfg.terrain.mode == "flat" else unitree_go2_rough_env_cfg
         env_cfg = factory(play=play, go2_cfg=self.cfg, terrain_map=self.map)
+        commands = self.cfg.commands
+        self._high_stair_starts = None
         if no_terminations:
             env_cfg.terminations = {}
         if video_height is not None:
@@ -77,6 +80,15 @@ class Go2TransitionAdapter:
                 l4, l5 = int((levels == 4).sum()), int((levels == 5).sum())
                 print(f"[INFO] High stair training allocation: L4={l4}, L5={l5}, regular={self.num_envs - l4 - l5}",
                       flush=True)
+            self._high_stair_speeds = None
+            if not play and commands.high_stair_straight_fraction:
+                self._high_stair_starts = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+                self._high_stair_speeds = torch.tensor(
+                    commands.high_stair_straight_speeds, device=self.device, dtype=torch.float32)
+                self.raw_env.event_manager.get_term_cfg("reset_root").func = self._reset_stair_approach_root
+                print(f"[INFO] High stair straight commands: fraction={commands.high_stair_straight_fraction:g}, "
+                      f"speeds={commands.high_stair_straight_speeds} m/s, "
+                      f"duration={commands.high_stair_straight_seconds:g} s", flush=True)
             self.context_version = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
             self._state = None
             self._play_commands = None
@@ -119,6 +131,17 @@ class Go2TransitionAdapter:
 
     # ---------- 回合重置 ----------
 
+    def _reset_stair_approach_root(self, env, env_ids, pose_range, velocity_range=None):
+        focused = self._high_stair_starts[env_ids]
+        ordinary_ids = env_ids[~focused]
+        stair_ids = env_ids[focused]
+        if ordinary_ids.numel():
+            reset_root_state_uniform(env, ordinary_ids, pose_range, velocity_range)
+        if stair_ids.numel():
+            # 上行楼梯沿世界 +X。变化起跑距离和航向，覆盖不同到阶相位。
+            approach = dict(pose_range, x=(0.35, 0.75), y=(-0.20, 0.20), yaw=(-0.14, 0.14))
+            reset_root_state_uniform(env, stair_ids, approach, velocity_range)
+
     def _set_origins(self, ids):
         if self.cfg.terrain.mode == "flat":
             return
@@ -145,8 +168,26 @@ class Go2TransitionAdapter:
         context[:, CONTEXT_ZERO_PROBABILITY] = probability.squeeze(-1)
         return context
 
+    def _set_high_stair_commands(self, ids, state):
+        chosen = self._high_stair_starts[ids]
+        speed_indices = torch.randint(self._high_stair_speeds.numel(), ids.shape, device=self.device)
+        speed = self._high_stair_speeds[speed_indices]
+        zeros = torch.zeros_like(speed)
+        command = torch.stack((speed, zeros, zeros), dim=-1)
+        state.command.copy_(torch.where(chosen[:, None], command, state.command))
+        memory = state.memory
+        memory[:, COMMAND_TIMER] = torch.where(
+            chosen, self.cfg.commands.high_stair_straight_seconds, memory[:, COMMAND_TIMER])
+        memory[:, STANDING] = torch.where(chosen, 0., memory[:, STANDING])
+        memory[:, HEADING_TARGET] = torch.where(chosen, self.robot.data.heading_w[ids], memory[:, HEADING_TARGET])
+        memory[:, COMMAND_MODE] = torch.where(chosen, FIXED_STRAIGHT_MODE, memory[:, COMMAND_MODE])
+
     def _reset_rows(self, ids):
         self._set_origins(ids)
+        if self._high_stair_starts is not None:
+            chances = torch.rand(ids.shape, device=self.device)
+            pinned = self.terrain_curriculum.high_stair_levels[ids] >= 4
+            self._high_stair_starts[ids] = pinned & (chances < self.cfg.commands.high_stair_straight_fraction)
         self.raw_env.reset(env_ids=ids)
         physical = self.task.read_physical(self.raw_env)
         context = self._context(ids)
@@ -154,6 +195,8 @@ class Go2TransitionAdapter:
         if self._play_commands is not None:
             reset_state.command.copy_(self._play_commands[ids])
             reset_state.memory[:, COMMAND_OVERRIDE] = 1
+        elif self._high_stair_speeds is not None:
+            self._set_high_stair_commands(ids, reset_state)
         if self._state is None:
             self._state = reset_state.detached_clone()
         else:
@@ -211,6 +254,10 @@ class Go2TransitionAdapter:
         if not self.play:
             self.command_curriculum.control_steps += 1
             self.terrain_curriculum.control_steps = self.raw_env.common_step_counter
+        high_stair_fraction = None
+        if self._high_stair_starts is not None:
+            within_start = before.memory[:, ELAPSED_TIME] < self.cfg.commands.high_stair_straight_seconds
+            high_stair_fraction = (self._high_stair_starts & within_start).float().mean()
         self._state = final.detached_clone()
         done_ids = (terminated | truncated).nonzero().flatten()
         # 对齐HIM：先用已执行的旧命令结算课程，再累计本步，结束行随后清零。
@@ -235,6 +282,8 @@ class Go2TransitionAdapter:
         if self.cfg.commands.rel_fixed_straight_envs:
             self.last_metrics["fixed_straight_fraction"] = (
                 (before.memory[:, COMMAND_MODE] == FIXED_STRAIGHT_MODE).float().mean())
+        if high_stair_fraction is not None:
+            self.last_metrics["high_stair_straight_env_fraction"] = high_stair_fraction
         return EnvStep(final, self._state.detached_clone(), reward, terminated, truncated, versions)
 
     # ---------- 课程持久化与资源释放 ----------

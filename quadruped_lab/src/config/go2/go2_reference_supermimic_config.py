@@ -244,6 +244,9 @@ class Go2ReferenceCfg(BaseConfig):
         rel_forward_envs = 0.05
         rel_fixed_straight_envs = 0.0  # 行走指令窗口中固定低速直行的比例。
         fixed_straight_speed = 0.30  # 固定直行的机身前向速度，米每秒。
+        high_stair_straight_fraction = 0.0  # 固定 L4/L5 训练环境中采集正面入阶的回合比例。
+        high_stair_straight_speeds = (0.50, 0.75, 1.00)  # 按回合等概率采样，米每秒。
+        high_stair_straight_seconds = 5.0  # 入阶直行指令时长，之后恢复常规采样。
 
     class reward:
         """机体系平移及指定HIM奖励；各项先返回奖励率。"""
@@ -288,6 +291,10 @@ class Go2ReferenceCfg(BaseConfig):
             track_angular_velocity = 2.0
             flat_forward_velocity_error = 0.0
             front_riser_clearance_shortfall = 0.0
+            first_riser_swing_shortfall = 0.0
+            first_riser_body_shortfall = 0.0
+            next_tread_front_foot_shortfall = 0.0
+            next_tread_body_shortfall = 0.0
             is_terminated = -100.0  # 失败终止奖励率；想象端使用软失败概率，正常超时不罚。
             action_rate_l2 = -0.1
             joint_pos_limits = -10.0

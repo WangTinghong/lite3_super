@@ -2,6 +2,7 @@
 """同一接触几何下比较 Lite3 正面上楼梯与平地直行。"""
 
 import argparse
+from contextlib import nullcontext
 from functools import partial
 import json
 import math
@@ -19,6 +20,7 @@ from mjlab.sensor import ContactMatch, ContactSensorCfg
 import src.assets.robots.lite3.lite3 as robot
 from src.assets.robots.lite3.constants import FOOT_COLLISION_RADIUS_M
 from src.tasks.locomotion.go2_supermimic.config import env_cfgs
+from src.tasks.locomotion.go2_supermimic.mdp.reference_rotations import quat_to_mat
 from src.tasks.locomotion.go2_supermimic.mdp.reference_state import POSE
 from src.tasks.locomotion.go2_supermimic.mdp.terrains import TerrainGeometry
 from src.tasks.locomotion.go2_supermimic.rl.playback import make_playback
@@ -27,7 +29,10 @@ from src.tasks.locomotion.go2_supermimic.rl.transition_adapter import Go2Transit
 
 STAIRS = "pyramid_stairs_inv_3"
 FRONT_GEOMS = ("FL_FOOT_collision", "FR_FOOT_collision", "FL_SHANK_collision", "FR_SHANK_collision")
+TORSO_COLLISION = "TORSO_collision"
+TORSO_VISUAL = "TORSO_visual"
 SLOTS = 4
+TOP_HOLD_S = 0.30
 _make_env_cfg = env_cfgs.make_go2_supermimic_env_cfg
 
 
@@ -39,11 +44,16 @@ def stair_contacts(cfg, **kwargs):
         primary=ContactMatch(mode="geom", pattern=FRONT_GEOMS, entity="robot"),
         secondary=ContactMatch(mode="body", pattern="terrain"),
         fields=("found", "force", "normal", "pos"), reduce="maxforce", num_slots=SLOTS,
+    ), ContactSensorCfg(
+        name="stair_torso_contacts",
+        primary=ContactMatch(mode="geom", pattern=TORSO_COLLISION, entity="robot"),
+        secondary=ContactMatch(mode="body", pattern="terrain"),
+        fields=("found", "force", "pos", "normal"), reduce="maxforce", num_slots=SLOTS,
     ),)
     return env_cfg
 
 
-def reset_on(env, family, x, level=0):
+def reset_on(env, family, x, level=0, *, vx=0.30):
     adapter = env.adapter
     column = adapter.map.family_names.index(family)
 
@@ -55,7 +65,7 @@ def reset_on(env, family, x, level=0):
     adapter._set_origins = fixed_origins
     pose = adapter.raw_env.event_manager.get_term_cfg("reset_root").params["pose_range"]
     pose.update(x=(x, x), y=(0., 0.), yaw=(0., 0.))
-    adapter.set_play_commands((0.30, 0., 0.))
+    adapter.set_play_commands((vx, 0., 0.))
     torch.manual_seed(adapter.cfg.env.seed)
     return env.reset()
 
@@ -92,7 +102,7 @@ def first_riser_geometry(adapter, origin, radius):
 def first_riser_metrics(trace, root_x, dt):
     """统计首阶事件；时刻为相对回合开始的控制周期采样值。"""
     by_foot = {}
-    near_steps, crossed_steps = [], []
+    near_steps, crossed_steps, encounter_steps = [], [], []
 
     def first(mask):
         indices = mask.nonzero().flatten()
@@ -120,6 +130,8 @@ def first_riser_metrics(trace, root_x, dt):
             return lift if not support[lift:event].any() else None
 
         encountered = min(i for i in (edge, hit) if i is not None) if edge is not None or hit is not None else None
+        if encountered is not None:
+            encounter_steps.append(encountered)
         first_lift = observed_liftoff(encountered)
         hit_lift = observed_liftoff(hit)
         crossing_lift = observed_liftoff(crossed)
@@ -147,15 +159,89 @@ def first_riser_metrics(trace, root_x, dt):
         end = max(crossed_steps) if len(crossed_steps) == 2 else len(root_x) - 1
         progress = root_x[start:end + 1].diff() / dt
         low_speed_time = int((progress < .08).sum()) * dt
-    return {"front_feet": by_foot, "near_edge_forward_below_0p08_s": low_speed_time}
+    approach_speed = None
+    if encounter_steps:
+        end = min(encounter_steps) - 1  # 避开开始接触或首次到达立面的采样帧。
+        start = max(0, end - round(.20 / dt))
+        if end > start:
+            approach_speed = (root_x[end] - root_x[start]).item() / ((end - start) * dt)
+    return {"front_feet": by_foot, "near_edge_forward_below_0p08_s": low_speed_time,
+            "approach_forward_speed_mps": approach_speed}
+
+
+def riser_forces(contacts):
+    """识别法线近水平且朝向楼梯进场轴的接触力。"""
+    force = contacts.force[:, :, 0].abs()
+    facing = contacts.normal[:, :, 0].abs() >= .50
+    steep = contacts.normal[:, :, 2].abs() <= .70
+    return torch.where((contacts.found > 0) & facing & steep & (force >= 1.), force, 0.)
+
+
+def first_riser_risk(trace, dt):
+    """以物理子步累积首阶双前腿接触和碰撞后的低头速度。"""
+    front, rear = trace[:, :2], trace[:, 2]
+    hits = front > 0
+    both = hits.all(dim=-1)
+    changes = torch.diff(torch.cat((both.new_zeros(1), both, both.new_zeros(1))).int())
+    starts = (changes > 0).nonzero().flatten()
+    ends = (changes < 0).nonzero().flatten()
+    first = hits.any(dim=-1).nonzero().flatten()
+    peak_pitch, peak_pitch_rate = None, None
+    if first.numel():
+        start = int(first[0])
+        window = trace[start:start + max(1, round(.20 / dt)), 3:5]
+        peak_pitch, peak_pitch_rate = window.amax(dim=0).clamp_min(0.).tolist()
+    return {
+        "dual_front_contact_s": int(both.sum()) * dt,
+        "longest_dual_front_contact_s": int((ends - starts).amax()) * dt if starts.numel() else 0.,
+        "peak_first_riser_front_contact_n": front.amax().item() if front.numel() else 0.,
+        "peak_nose_down_pitch_after_first_hit_deg": peak_pitch,
+        "peak_nose_down_rate_after_first_hit_deg_s": peak_pitch_rate,
+        "peak_rear_forward_force_during_dual_contact_n": rear[both].amax().item() if starts.numel() else None,
+    }
+
+
+def front_shell_vertices(model, reference):
+    """取机身碰撞盒前端之外的视觉网格点，保留网格局部坐标。"""
+    visual = model.geom(f"robot/{TORSO_VISUAL}")
+    box = model.geom(f"robot/{TORSO_COLLISION}")
+    mesh = int(visual.dataid[0])
+    start = model.mesh_vertadr[mesh]
+    vertices = reference.new_tensor(model.mesh_vert[start:start + model.mesh_vertnum[mesh]].copy())
+    body_rotation = quat_to_mat(reference.new_tensor(visual.quat.copy()))
+    body_x = vertices @ body_rotation[0] + float(visual.pos[0])
+    return visual.id, vertices[body_x >= float(box.pos[0] + box.size[0])]
+
+
+def torso_ascent_safety(trace, dt):
+    """分开报告求解器接触与视觉前壳在首级踏面上的几何净空。"""
+    torso_hit, first_torso_hit, torso_force, shell_clearance, approach, contact_x, second_riser_hit = trace[:, 5:].unbind(-1)
+    hit = torso_hit.bool()
+    observed = torch.isfinite(shell_clearance)
+    clearance = shell_clearance[observed].amin().item() if observed.any() else None
+    hit_steps = hit.nonzero().flatten()
+    pitch = trace[:, 3].clamp_min(0.)
+    near_first = approach.bool()
+    return {
+        "torso_contact_s": int(hit.sum()) * dt,
+        "first_torso_contact_time_s": (int(hit_steps[0]) + 1) * dt if hit_steps.numel() else None,
+        "first_torso_contact_local_x_m": contact_x[hit_steps[0]].item() if hit_steps.numel() else None,
+        "first_riser_torso_contact_s": int(first_torso_hit.sum()) * dt,
+        "second_riser_torso_contact_s": int(second_riser_hit.sum()) * dt,
+        "peak_torso_contact_force_n": torso_force.amax().item(),
+        "first_riser_min_front_shell_clearance_mm": clearance * 1000 if clearance is not None else None,
+        "first_riser_front_shell_overlap": (clearance < 0.) if clearance is not None else None,
+        "peak_nose_down_pitch_deg": pitch.amax().item(),
+        "peak_nose_down_pitch_near_first_riser_deg": pitch[near_first].amax().item() if near_first.any() else None,
+    }
 
 
 @torch.inference_mode()
-def rollout(env, policy, stairs, stair_level=0, start_x=0.65):
+def rollout(env, policy, stairs, stair_level=0, start_x=0.65, *, vx=0.30):
     adapter = env.adapter
     dt = adapter.step_dt
     obs = reset_on(env, STAIRS if stairs else "flat", start_x if stairs else 0.,
-                   stair_level if stairs else 0)
+                   stair_level if stairs else 0, vx=vx)
     initial_yaw = adapter.task.yaw(adapter.get_state()).cpu()
     origin = adapter.raw_env.scene.env_origins[:, :2].clone()
     radius = adapter.map.size[0] * 0.5
@@ -168,42 +254,139 @@ def rollout(env, policy, stairs, stair_level=0, start_x=0.65):
     alive = torch.ones(adapter.num_envs, dtype=torch.bool, device=adapter.device)
     rows = []
     timing_rows = []
-    for _ in range(round((15. if stairs else 7.) / dt)):
-        obs, _, terminated, truncated, info = env.step(policy(obs))
-        alive &= ~(terminated | truncated)
-        state = info["final_state"]
-        yaw = adapter.task.yaw(state)
-        relative_x = state.physical[:, POSE.start] - origin[:, 0]
-        xy = adapter.robot.data.site_pos_w[:, foot_ids, :2]
-        height = adapter.task.surface_height(xy)
-        inside = ((xy - origin[:, None]).abs() < radius - 0.05).all(dim=(1, 2))
-        on_top = alive & inside & (height >= top[:, None] - 0.005).all(dim=1)
+    risk_rows = []
+    slot_shape = (adapter.num_envs, len(sensor.primary_names), SLOTS)
+    capture = nullcontext()
+    if stairs:
+        world_edge = origin[:, :1] + edge_x
+        tread_end = world_edge + adapter.map.generator.sub_terrains[STAIRS].step_width
+        rear_sensor = adapter.raw_env.scene["feet_ground_contact"]
+        rear_indices = [rear_sensor.primary_names.index(f"{leg}_FOOT_collision") for leg in ("HL", "HR")]
+        torso_sensor = adapter.raw_env.scene["stair_torso_contacts"]
+        sim = adapter.raw_env.sim
+        shell_geom, shell_vertices = front_shell_vertices(sim.mj_model, origin)
+        manager = adapter.raw_env.metrics_manager
+        compute_substep = manager.compute_substep
 
-        contacts = sensor.data
-        force = contacts.force[:, :, 0].abs()
-        facing = contacts.normal[:, :, 0].abs() >= 0.50
-        steep = contacts.normal[:, :, 2].abs() <= 0.70
-        riser = torch.where((contacts.found > 0) & facing & steep & (force >= 1.), force, 0.)
-        per_geom = riser.reshape(adapter.num_envs, len(sensor.primary_names), SLOTS).amax(-1)
-        rows.append(torch.cat((alive[:, None], yaw[:, None], relative_x[:, None], on_top[:, None],
-                               per_geom[:, front_indices]), dim=1))
-        if stairs:
-            foot_positions = adapter.robot.data.site_pos_w[:, foot_ids[:2]]
-            edge_force = torch.where((contacts.pos[:, :, 0] - origin[:, :1] - edge_x).abs() <= .03, riser, 0.)
-            support = (contacts.found > 0) & ~steep & (force >= 1.)
-            slot_shape = (adapter.num_envs, len(sensor.primary_names), SLOTS)
-            indices = front_indices[:2]
-            timing_rows.append(torch.stack((
-                foot_positions[..., 0] - origin[:, :1] - edge_x,
-                foot_positions[..., 2] - FOOT_COLLISION_RADIUS_M - tread_z,
-                support.reshape(slot_shape).any(-1)[:, indices],
-                edge_force.reshape(slot_shape).amax(-1)[:, indices],
-            ), dim=-1))
+        def record_substep():
+            compute_substep()
+            contacts = sensor.data
+            at_edge = (contacts.pos[..., 0] - world_edge).abs() <= .03
+            front = torch.where(at_edge, riser_forces(contacts), 0.).reshape(slot_shape).amax(-1)
+            front = front[:, front_indices].reshape(-1, 2, 2).amax(dim=1)
+            rear = rear_sensor.data.force[:, rear_indices, 0].clamp_min(0.).sum(-1)
+            data = adapter.robot.data
+            gravity, omega = data.projected_gravity_b, data.root_link_ang_vel_b
+            cosine = gravity[:, 1:].norm(dim=-1)
+            pitch = gravity[:, 0].atan2(cosine)
+            pitch_rate = (omega[:, 2] * gravity[:, 1] - omega[:, 1] * gravity[:, 2]) / cosine.clamp_min(1e-6)
+            angles = torch.rad2deg(torch.stack((pitch, pitch_rate), dim=-1))
+            torso = torso_sensor.data
+            torso_hit = torso.found > 0
+            torso_x = torso.pos[..., 0]
+            first_hit = torso_hit & (torso_x >= world_edge - .03) & (torso_x <= tread_end)
+            second_hit = ((torso_x - tread_end).abs() <= .03) & (riser_forces(torso) > 0.)
+            torso_force, torso_slot = torch.where(torso_hit, torso.force[..., 0].abs(), -1.).max(-1)
+            torso_contact_x = torso_x.gather(-1, torso_slot[:, None]).squeeze(-1) - origin[:, 0]
+            rotation = sim.data.geom_xmat[:, shell_geom]
+            shell = shell_vertices @ rotation.transpose(-1, -2) + sim.data.geom_xpos[:, shell_geom, None]
+            shell_x, shell_y, shell_z = shell.unbind(-1)
+            # 只看首级踏面内，避开不同踏面和立面边缘约2毫米的定位误差。
+            over_first = ((shell_x >= world_edge + .002) & (shell_x <= tread_end - .002)
+                          & ((shell_y - origin[:, 1:2]).abs() <= edge_x - .002))
+            clearance = torch.where(over_first, shell_z - tread_z, torch.inf).amin(dim=-1)
+            approach = ((shell_x.amax(dim=-1) >= world_edge[:, 0] - .25)
+                        & (data.root_link_pos_w[:, 0] <= world_edge[:, 0]))
+            body = torch.stack((torso_hit.any(-1), first_hit.any(-1), torso_force.clamp_min(0.),
+                                clearance, approach, torso_contact_x, second_hit.any(-1)), dim=-1)
+            risk_rows.append(torch.cat((front, rear[:, None], angles, body), dim=-1))
+
+        capture = patch.object(manager, "compute_substep", record_substep)
+    with capture:
+        for _ in range(round((15. if stairs else 7.) / dt)):
+            obs, _, terminated, truncated, info = env.step(policy(obs))
+            alive &= ~(terminated | truncated)
+            state = info["final_state"]
+            yaw = adapter.task.yaw(state)
+            relative_x = state.physical[:, POSE.start] - origin[:, 0]
+            xy = adapter.robot.data.site_pos_w[:, foot_ids, :2]
+            height = adapter.task.surface_height(xy)
+            inside = ((xy - origin[:, None]).abs() < radius - 0.05).all(dim=(1, 2))
+            on_top = alive & inside & (height >= top[:, None] - 0.005).all(dim=1)
+
+            contacts = sensor.data
+            riser = riser_forces(contacts)
+            per_geom = riser.reshape(slot_shape).amax(-1)
+            rows.append(torch.cat((alive[:, None], yaw[:, None], relative_x[:, None], on_top[:, None],
+                                   per_geom[:, front_indices]), dim=1))
+            if stairs:
+                foot_positions = adapter.robot.data.site_pos_w[:, foot_ids[:2]]
+                edge_force = torch.where((contacts.pos[..., 0] - world_edge).abs() <= .03, riser, 0.)
+                support = ((contacts.found > 0) & (contacts.normal[..., 2].abs() > .70)
+                           & (contacts.force[..., 0].abs() >= 1.))
+                indices = front_indices[:2]
+                timing_rows.append(torch.stack((
+                    foot_positions[..., 0] - world_edge,
+                    foot_positions[..., 2] - FOOT_COLLISION_RADIUS_M - tread_z,
+                    support.reshape(slot_shape).any(-1)[:, indices],
+                    edge_force.reshape(slot_shape).amax(-1)[:, indices],
+                ), dim=-1))
     timing = torch.stack(timing_rows).cpu() if timing_rows else None
-    result = summarize(torch.stack(rows).cpu(), initial_yaw, dt, stairs, timing)
+    rows = torch.stack(rows).cpu()
+    result = summarize(rows, initial_yaw, dt, stairs, timing)
     if stairs:
         result["first_riser_local_x_m"] = edge_x
         result["sample_period_s"] = dt
+        sub_dt = adapter.raw_env.physics_dt
+        substeps = round(dt / sub_dt)
+        if len(risk_rows) != len(rows) * substeps:
+            raise RuntimeError("The first-riser sensor did not record every physics substep")
+        samples = torch.stack(risk_rows).cpu()
+        risks = []
+        bodies = []
+        for entry in result["by_env"]:
+            index = entry["env"]
+            valid = int(rows[:, index, 0].sum())
+            end_step = round(entry["top_entry_s"] / dt) if "top_entry_s" in entry else valid + entry["ended_early"]
+            risk = first_riser_risk(samples[:end_step * substeps, index], sub_dt)
+            entry["first_riser_risk"] = risk
+            risks.append(risk)
+            if entry.get("reached_top", False):
+                end_step = min(valid, end_step - 1 + math.ceil(TOP_HOLD_S / dt))
+            body = torso_ascent_safety(samples[:end_step * substeps, index], sub_dt)
+            entry["torso_ascent_safety"] = body
+            bodies.append(body)
+        overlap = [r["dual_front_contact_s"] for r in risks]
+        peaks = [r["peak_nose_down_rate_after_first_hit_deg_s"] for r in risks
+                 if r["peak_nose_down_rate_after_first_hit_deg_s"] is not None]
+        result["first_riser_risk"] = {
+            "sample_period_s": sub_dt,
+            "envs_with_dual_front_contact": sum(t > 0. for t in overlap),
+            "total_dual_front_contact_s": sum(overlap),
+            "max_contiguous_dual_front_contact_s": max(r["longest_dual_front_contact_s"] for r in risks),
+            "max_first_riser_front_contact_n": max(r["peak_first_riser_front_contact_n"] for r in risks),
+            "median_peak_nose_down_rate_after_first_hit_deg_s": median(peaks) if peaks else None,
+        }
+        shell_clearances = [b["first_riser_min_front_shell_clearance_mm"] for b in bodies
+                            if b["first_riser_min_front_shell_clearance_mm"] is not None]
+        approach_pitch = [b["peak_nose_down_pitch_near_first_riser_deg"] for b in bodies
+                          if b["peak_nose_down_pitch_near_first_riser_deg"] is not None]
+        result["torso_ascent_safety"] = {
+            "envs_with_torso_contact": sum(b["torso_contact_s"] > 0. for b in bodies),
+            "envs_with_first_riser_torso_contact": sum(b["first_riser_torso_contact_s"] > 0. for b in bodies),
+            "envs_with_second_riser_torso_contact": sum(b["second_riser_torso_contact_s"] > 0. for b in bodies),
+            "envs_with_first_riser_shell_measurement": sum(b["first_riser_front_shell_overlap"] is not None for b in bodies),
+            "envs_with_first_riser_shell_overlap": sum(b["first_riser_front_shell_overlap"] is True for b in bodies),
+            "min_first_riser_front_shell_clearance_mm": min(shell_clearances) if shell_clearances else None,
+            "max_nose_down_pitch_deg": max(b["peak_nose_down_pitch_deg"] for b in bodies),
+            "max_nose_down_pitch_near_first_riser_deg": max(approach_pitch) if approach_pitch else None,
+            "reached_top_without_torso_contact": sum(
+                e.get("reached_top", False) and b["torso_contact_s"] == 0.
+                for e, b in zip(result["by_env"], bodies, strict=True)),
+            "reached_top_with_clear_nose_and_no_torso_contact": sum(
+                e.get("reached_top", False) and b["torso_contact_s"] == 0. and b["first_riser_front_shell_overlap"] is False
+                for e, b in zip(result["by_env"], bodies, strict=True)),
+        }
     return result
 
 
@@ -221,7 +404,7 @@ def summarize(rows, initial_yaw, dt, stairs, timing=None):
             changes = torch.diff(torch.cat((top.new_zeros(1), top, top.new_zeros(1))).int())
             runs = list(zip((changes > 0).nonzero().flatten().tolist(),
                             (changes < 0).nonzero().flatten().tolist(), strict=True))
-            stable = next(((first, end) for first, end in runs if (end - first) * dt >= 0.30), None)
+            stable = next(((first, end) for first, end in runs if (end - first) * dt >= TOP_HOLD_S), None)
             result["reached_top"] = stable is not None
             approach = valid[:stable[0]] if stable is not None else valid
             if timing is not None and len(approach):
@@ -249,6 +432,10 @@ def summarize(rows, initial_yaw, dt, stairs, timing=None):
         result["median_top_entry_s"] = median(top_times) if top_times else None
         near_edge = [row["first_riser"] for row in by_env if "first_riser" in row]
         if near_edge:
+            approach_speeds = [r["approach_forward_speed_mps"] for r in near_edge
+                               if r["approach_forward_speed_mps"] is not None]
+            result["approach_speed_samples"] = len(approach_speeds)
+            result["median_approach_forward_speed_mps"] = median(approach_speeds) if approach_speeds else None
             slow_times = [r["near_edge_forward_below_0p08_s"] for r in near_edge
                           if r["near_edge_forward_below_0p08_s"] is not None]
             result["median_near_edge_forward_below_0p08_s"] = median(slow_times) if slow_times else None
@@ -274,7 +461,7 @@ def summarize(rows, initial_yaw, dt, stairs, timing=None):
     return result
 
 
-def evaluate(checkpoint, device, num_envs, stair_level=0, start_x=0.65, stairs_only=False):
+def evaluate(checkpoint, device, num_envs, stair_level=0, start_x=0.65, stairs_only=False, *, vx=0.30):
     with patch.object(env_cfgs, "make_go2_supermimic_env_cfg", stair_contacts):
         env, policy = make_playback("Lite3-SuperMimic-Rough", checkpoint_file=checkpoint,
                                     device=device, num_envs=num_envs)
@@ -282,9 +469,9 @@ def evaluate(checkpoint, device, num_envs, stair_level=0, start_x=0.65, stairs_o
         if not 0 <= stair_level < env.adapter.map.rows:
             raise ValueError(f"Stair level must be between 0 and {env.adapter.map.rows - 1}")
         result = {"checkpoint": str(checkpoint), "stair_level": stair_level, "stair_start_x_m": start_x,
-                  "stairs": rollout(env, policy, True, stair_level, start_x)}
+                  "command_vx_mps": vx, "stairs": rollout(env, policy, True, stair_level, start_x, vx=vx)}
         if not stairs_only:
-            result["flat"] = rollout(env, policy, False)
+            result["flat"] = rollout(env, policy, False, vx=vx)
         return result
     finally:
         env.close()
@@ -298,13 +485,15 @@ def main():
     parser.add_argument("--num-envs", type=int, default=8)
     parser.add_argument("--stair-level", type=int, default=0)
     parser.add_argument("--start-x", type=float, default=0.65, help="Starting X offset on the stair tile (m).")
+    parser.add_argument("--vx", type=float, default=0.30, help="Forward command in m/s.")
     parser.add_argument("--stairs-only", action="store_true", help="Skip the flat-ground control run.")
     args = parser.parse_args()
-    if args.num_envs < 1 or args.stair_level < 0 or not math.isfinite(args.start_x):
-        parser.error("Expected a positive environment count, nonnegative stair level and finite start offset")
+    if args.num_envs < 1 or args.stair_level < 0 or not math.isfinite(args.start_x) or not math.isfinite(args.vx) or args.vx <= 0:
+        parser.error("Expected a positive environment count, nonnegative stair level, finite start offset and positive forward speed")
     with patch.object(robot, "get_spec", partial(robot.get_spec, shank_radius_m=0.021)):
         for checkpoint in (args.baseline, *args.candidates):
-            report = evaluate(checkpoint, args.device, args.num_envs, args.stair_level, args.start_x, args.stairs_only)
+            report = evaluate(checkpoint, args.device, args.num_envs, args.stair_level, args.start_x, args.stairs_only,
+                              vx=args.vx)
             print(json.dumps(report, indent=2), flush=True)
 
 
