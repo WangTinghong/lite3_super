@@ -5,8 +5,13 @@ import math
 
 import torch
 
-from .state_spec import AIR_TIME, CONTACT, CONTACT_TIME, ELAPSED_TIME
-from .reference_state import FEET, HIPS
+from .state_spec import AIR_TIME, CONTACT, CONTACT_TIME, ELAPSED_TIME, FOOT_NAMES
+from .reference_state import FEET, HIPS, POSE
+
+
+DIAGONAL_PAIRS = (("FL", "HR"), ("FR", "HL"))
+_DIAGONAL_FIRST = tuple(FOOT_NAMES.index(first) for first, _ in DIAGONAL_PAIRS)
+_DIAGONAL_SECOND = tuple(FOOT_NAMES.index(second) for _, second in DIAGONAL_PAIRS)
 
 
 def gait_phase(state, dt, period):
@@ -35,10 +40,20 @@ def gait_reward_terms(task, state, next_state):
     durations = desired * contact * stance_score + (1 - desired) * (1 - contact) * swing_score
     terms = {"foot_gait": matches.mean(-1) * active, "feet_air_time": durations.mean(-1) * active}
     scales = task.cfg.reward.scales
-    if scales.swing_clearance_shortfall or scales.front_reach_shortfall:
-        swing = ((leg_phase - cfg.stance_fraction) / (1 - cfg.stance_fraction)).clamp(0., 1.)
+    if scales.swing_clearance_shortfall or scales.front_reach_shortfall or scales.diagonal_contact_mismatch:
         vx, vy, yaw = state.command.unbind(-1)
         straight_forward = ((vx - 0.2) / 0.2).clamp(0., 1.) * (vy.abs() <= 0.1) * (yaw.abs() <= 0.25)
+    if scales.swing_clearance_shortfall or scales.front_reach_shortfall:
+        swing = ((leg_phase - cfg.stance_fraction) / (1 - cfg.stance_fraction)).clamp(0., 1.)
+    if scales.diagonal_contact_mismatch:
+        # 台阶附近放宽同步约束，给跨沿脚保留调整落足时机的空间。
+        xy = next_state.physical[:, POSE][:, :2].detach()
+        probes = xy.new_tensor(((0., 0.), (.4, 0.), (-.4, 0.), (0., .4), (0., -.4)))
+        heights = task.surface_height(xy[:, None] + probes)
+        relief = heights.amax(-1) - heights.amin(-1)
+        flat = (1. - relief / 0.03).clamp(0., 1.)
+        mismatch = (contact[:, _DIAGONAL_FIRST] - contact[:, _DIAGONAL_SECOND]).square().mean(-1)
+        terms["diagonal_contact_mismatch"] = straight_forward * flat * mismatch
     if scales.swing_clearance_shortfall:
         # 足端中心与半径 25 mm 的小腿碰撞端点重合。
         clearance = task.feet_height(next_state.physical) - 0.025

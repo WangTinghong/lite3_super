@@ -56,7 +56,7 @@ def validate_config(cfg: Go2ReferenceCfg) -> None:
         raise ValueError("Linear velocity tracking frame must be body or heading")
     if cfg.reward.body_ang_vel_frame not in ("body", "heading"):
         raise ValueError("Body angular velocity penalty frame must be body or heading")
-    for name in ("swing_clearance_shortfall", "front_reach_shortfall"):
+    for name in ("swing_clearance_shortfall", "front_reach_shortfall", "diagonal_contact_mismatch"):
         weight = getattr(cfg.reward.scales, name)
         if not math.isfinite(weight) or weight > 0:
             raise ValueError(f"Reward weight must be finite and nonpositive: {name}")
