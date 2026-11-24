@@ -71,6 +71,12 @@ class Go2TransitionAdapter:
                 episode_length_s=self.cfg.env.episode_length_s, device=self.device)
             if not self.map.plane:
                 self.terrain_curriculum.family_ids.copy_(terrain.terrain_types)
+            if not play and self.cfg.terrain.high_stair_fraction:
+                self.terrain_curriculum.focus_high_stairs(self.cfg.terrain.high_stair_fraction)
+                levels = self.terrain_curriculum.high_stair_levels
+                l4, l5 = int((levels == 4).sum()), int((levels == 5).sum())
+                print(f"[INFO] High stair training allocation: L4={l4}, L5={l5}, regular={self.num_envs - l4 - l5}",
+                      flush=True)
             self.context_version = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
             self._state = None
             self._play_commands = None

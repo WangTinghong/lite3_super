@@ -45,6 +45,7 @@ class TerrainCurriculum:
         self.family_ids = torch.repeat_interleave(torch.arange(terrain_map.cols, device=device), counts)
         self.level_counts = torch.full((terrain_map.cols,), terrain_map.rows, device=device, dtype=torch.long)
         self.levels = torch.zeros(num_envs, device=device, dtype=torch.long)
+        self.high_stair_levels = None
         self.episode_start_pos_w = torch.zeros(num_envs, 2, device=device)
         self.commanded_displacement_w = torch.zeros_like(self.episode_start_pos_w)
         if not self.enabled and not terrain_map.plane:
@@ -54,9 +55,27 @@ class TerrainCurriculum:
     def max_level(self):
         return self.map.rows - 1
 
+    def focus_high_stairs(self, fraction):
+        """在每种上行楼梯内固定部分环境到L4和L5，其余保留原升降课程。"""
+        if not self.enabled or self.max_level < 5:
+            raise ValueError("High stair training requires the rough terrain curriculum with levels 4 and 5")
+        levels = torch.full_like(self.levels, -1)
+        assigned = 0
+        for family, name in enumerate(self.map.family_names):
+            if name.startswith("pyramid_stairs_inv_"):
+                ids = (self.family_ids == family).nonzero().flatten()
+                selected = ids[:int(ids.numel() * fraction)]
+                ranks = assigned + torch.arange(selected.numel(), device=self.device)
+                levels[selected] = torch.where(ranks.remainder(3) == 1, 4, 5)
+                assigned += selected.numel()
+        self.high_stair_levels = levels
+        self.sample(torch.arange(self.levels.numel(), device=self.device))
+
     def sample(self, ids):
-        """重置保留已由行走表现决定的等级，不按训练进度重新抽样。"""
-        del ids
+        """重置保留表现课程等级，并恢复专门采集环境的指定等级。"""
+        if self.high_stair_levels is not None:
+            fixed = self.high_stair_levels[ids]
+            self.levels[ids] = torch.where(fixed >= 0, fixed, self.levels[ids])
 
     def reset(self, ids, positions):
         """以实际出生位置开始新回合，手动重置不参与升降。"""
@@ -73,7 +92,11 @@ class TerrainCurriculum:
 
     def update(self, env, ids, command):
         """结算已结束回合；当前结束步的命令积分在此之后推进。"""
-        if not self.enabled or ids.numel() == 0:
+        if not self.enabled:
+            return
+        if self.high_stair_levels is not None:
+            ids = ids[self.high_stair_levels[ids] < 0]
+        if ids.numel() == 0:
             return
         terrain = env.scene.terrain
         position = env.scene["robot"].data.root_link_pos_w[ids, :2]

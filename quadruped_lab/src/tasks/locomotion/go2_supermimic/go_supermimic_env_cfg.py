@@ -32,6 +32,8 @@ def validate_config(cfg: Go2ReferenceCfg) -> None:
         raise ValueError("The HIM adaptation requires heading commands for all moving environments")
     if cfg.commands.stages:
         raise ValueError("Velocity curriculum is disabled for the HIM adaptation")
+    if not 0.0 <= cfg.terrain.high_stair_fraction <= 1.0:
+        raise ValueError("High stair training fraction must lie in [0, 1]")
     if isinstance(cfg.env.num_envs, bool) or not isinstance(cfg.env.num_envs, int) or cfg.env.num_envs < 1:
         raise ValueError("Environment count must be a positive integer")
     if not math.isfinite(cfg.env.episode_length_s) or cfg.env.episode_length_s <= 0:

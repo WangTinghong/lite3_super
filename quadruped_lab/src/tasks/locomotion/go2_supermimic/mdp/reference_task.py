@@ -100,6 +100,8 @@ class Go2ReferenceTaskModel:
     def _semantic_config(self) -> dict:
         """以当前任务配置建立语义指纹，运行时预算不改变任务定义。"""
         config = self.cfg.to_dict()
+        if config["terrain"]["high_stair_fraction"] == 0.0:
+            config["terrain"].pop("high_stair_fraction")
         experiment = config["experiment"]
         if experiment["lite3_shank_collision_radius_m"] == LEGACY_SHANK_COLLISION_RADIUS_M:
             experiment.pop("lite3_shank_collision_radius_m")

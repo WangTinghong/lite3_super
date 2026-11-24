@@ -208,6 +208,7 @@ class Go2ReferenceCfg(BaseConfig):
         outer_flat_width_m = 20.0
         max_init_level = 0
         curriculum = True
+        high_stair_fraction = 0.0  # 各上行楼梯地形中专门采集L4、L5的环境比例。
         curriculum_iterations = 12000  # 保留旧配置字段；行走表现课程不使用该值。
         field_resolution_m = 0.02
         field_half_m = 6.5
