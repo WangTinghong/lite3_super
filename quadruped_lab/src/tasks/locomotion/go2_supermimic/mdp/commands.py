@@ -4,7 +4,10 @@
 import torch
 from mjlab.utils.lab_api.math import wrap_to_pi
 
-from .state_spec import COMMAND_MODE, COMMAND_OVERRIDE, COMMAND_TIMER, FIXED_STRAIGHT_MODE, HEADING_TARGET, STANDING
+from .state_spec import (
+    COMMAND_MODE, COMMAND_OVERRIDE, COMMAND_TIMER, FIXED_STRAIGHT_MODE,
+    HEADING_TARGET, HIGH_STAIR_HEADING_MODE, STANDING,
+)
 
 
 def sample_commands(cfg, context, yaw):
@@ -36,6 +39,9 @@ def heading_command(cfg, command, yaw, heading, standing, mode):
     error = wrap_to_pi(heading - yaw)
     angular = (cfg.heading_control_stiffness * error).clamp(*cfg.initial_ranges[2])
     angular = torch.where(mode == FIXED_STRAIGHT_MODE, 0., angular)
+    if cfg.high_stair_heading_feedback:
+        stair_yaw = (1.5 * error).clamp(-.30, .30)
+        angular = torch.where(mode == HIGH_STAIR_HEADING_MODE, stair_yaw, angular)
     result = torch.cat((command[:, :2], angular[:, None]), -1)
     return torch.where(standing[:, None].bool(), torch.zeros_like(result), result)
 

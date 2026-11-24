@@ -6,8 +6,9 @@ import torch
 
 from src.assets.robots.lite3.constants import FOOT_COLLISION_RADIUS_M
 
-from .reference_state import FEET, FOOT_CONTACT_FORCE, POSE, normalized_gravity, yaw_rotate_inverse
-from .state_spec import CONTACT, CONTACT_TIME, CONTEXT_ORIGIN
+from .reference_rotations import quat_to_mat
+from .reference_state import FEET, FOOT_CONTACT_FORCE, POSE, VELOCITY_HEADING, normalized_gravity, yaw_rotate_inverse
+from .state_spec import COMMAND_MODE, CONTACT, CONTACT_TIME, CONTEXT_ORIGIN, HEADING_TARGET, HIGH_STAIR_HEADING_MODE
 
 
 def flat_ground_weight(task, physical):
@@ -170,6 +171,8 @@ def next_tread_front_foot_shortfall(task, state, next_state):
 
 def next_tread_body_shortfall(task, state, next_state):
     """在机身前沿分别检查外壳和碰撞盒，连续跟随楼梯踏面。"""
+    if task.cfg.reward.next_tread_body_corner_probes:
+        return next_tread_body_corner_shortfall(task, state, next_state)
     xy = state.physical[:, POSE][:, :2]
     # 外壳前端和碰撞盒下前沿采用与诊断模型一致的保守纵向探针。
     lengths = xy.new_tensor((.279, .22))
@@ -189,6 +192,42 @@ def next_tread_body_shortfall(task, state, next_state):
     deficit = ((tread + .02 - bottom[..., None]) / .06).clamp_min(0.).square()
     per_edge = riser * proximity * deficit / (1. + deficit)
     return forward * per_edge.amax(dim=(-2, -1))
+
+
+def _front_body_points(task, state, offsets):
+    rotation = quat_to_mat(state.physical[:, task.root_quat])
+    return task.world_position(state)[:, None] + offsets @ rotation.transpose(-1, -2)
+
+
+def next_tread_body_corner_shortfall(task, state, next_state):
+    """各前角各查自己的踏面，按实际机身姿态计算下一步净空。"""
+    offsets = state.physical.new_tensor((
+        (.279, -.08, -.029), (.279, 0., -.029), (.279, .08, -.029),
+        (.220, -.08, -.070), (.220, 0., -.070), (.220, .08, -.070),
+    ))
+    with torch.no_grad():
+        yaw = task.yaw(state)
+        direction = torch.stack((yaw.cos(), yaw.sin()), dim=-1)
+        points = _front_body_points(task, state, offsets)
+        tread, riser, edge = _raised_treads(task, points[..., :2], direction)
+        forward = _forward_weight(state.command)
+    next_points = _front_body_points(task, next_state, offsets)
+    advance = ((next_points[..., :2] - points[..., :2]) * direction[:, None]).sum(-1)
+    proximity = _edge_proximity(edge, advance[..., None], .22)
+    deficit = ((tread + .02 - next_points[..., 2, None]) / .06).clamp_min(0.).square()
+    return forward * (riser * proximity * deficit / (1. + deficit)).amax(dim=(-2, -1))
+
+
+def high_stair_axis_alignment(task, state, next_state):
+    """只在楼梯专项窗口内约束朝向与楼梯轴的横向运动。"""
+    yaw_error = task.yaw(next_state) - state.memory[:, HEADING_TARGET]
+    angle = yaw_error.sin().atan2(yaw_error.cos())
+    velocity = next_state.physical[:, VELOCITY_HEADING]
+    lateral = angle.sin() * velocity[:, 0] + angle.cos() * velocity[:, 1]
+    yaw_cost = -torch.expm1(-(angle / .20).square())
+    lateral_cost = -torch.expm1(-(lateral / .20).square())
+    focused = state.memory[:, COMMAND_MODE] == HIGH_STAIR_HEADING_MODE
+    return .5 * (yaw_cost + lateral_cost) * focused
 
 
 def terrain_reward_terms(task, state, next_state, velocity):
@@ -213,4 +252,6 @@ def terrain_reward_terms(task, state, next_state, velocity):
         terms["next_tread_front_foot_shortfall"] = next_tread_front_foot_shortfall(task, state, next_state)
     if scales.next_tread_body_shortfall:
         terms["next_tread_body_shortfall"] = next_tread_body_shortfall(task, state, next_state)
+    if scales.high_stair_axis_alignment:
+        terms["high_stair_axis_alignment"] = high_stair_axis_alignment(task, state, next_state)
     return terms

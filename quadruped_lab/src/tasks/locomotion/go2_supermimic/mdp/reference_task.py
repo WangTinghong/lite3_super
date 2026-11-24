@@ -113,10 +113,14 @@ class Go2ReferenceTaskModel:
             commands.pop("high_stair_straight_fraction")
             commands.pop("high_stair_straight_speeds")
             commands.pop("high_stair_straight_seconds")
+        if not commands["high_stair_heading_feedback"]:
+            commands.pop("high_stair_heading_feedback")
         reward = config["reward"]
+        if not reward["next_tread_body_corner_probes"]:
+            reward.pop("next_tread_body_corner_probes")
         for name in ("swing_clearance_shortfall", "front_swing_clearance", "front_reach_shortfall",
                      "diagonal_contact_mismatch", "first_riser_swing_shortfall", "first_riser_body_shortfall",
-                     "next_tread_front_foot_shortfall", "next_tread_body_shortfall"):
+                     "next_tread_front_foot_shortfall", "next_tread_body_shortfall", "high_stair_axis_alignment"):
             if reward["scales"][name] == 0:
                 reward["scales"].pop(name)
         for name, parameter in (

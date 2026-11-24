@@ -46,6 +46,14 @@ def validate_config(cfg: Go2ReferenceCfg) -> None:
             raise ValueError("High stair straight speeds must be positive and within the forward command range")
         if not 0.0 < cfg.commands.high_stair_straight_seconds <= cfg.env.episode_length_s:
             raise ValueError("High stair straight duration must be positive and within the episode")
+    if not isinstance(cfg.commands.high_stair_heading_feedback, bool):
+        raise ValueError("High stair heading feedback flag must be boolean")
+    if cfg.commands.high_stair_heading_feedback and not straight_fraction:
+        raise ValueError("High stair heading feedback requires fixed stair approach episodes")
+    if not isinstance(cfg.reward.next_tread_body_corner_probes, bool):
+        raise ValueError("Next tread corner probe flag must be boolean")
+    if cfg.reward.scales.high_stair_axis_alignment and not cfg.commands.high_stair_heading_feedback:
+        raise ValueError("High stair axis alignment reward requires the stair heading command")
     if isinstance(cfg.env.num_envs, bool) or not isinstance(cfg.env.num_envs, int) or cfg.env.num_envs < 1:
         raise ValueError("Environment count must be a positive integer")
     if not math.isfinite(cfg.env.episode_length_s) or cfg.env.episode_length_s <= 0:
@@ -75,7 +83,8 @@ def validate_config(cfg: Go2ReferenceCfg) -> None:
         raise ValueError("Body angular velocity penalty frame must be body or heading")
     for name in ("swing_clearance_shortfall", "front_reach_shortfall", "diagonal_contact_mismatch",
                  "flat_forward_velocity_error", "front_riser_clearance_shortfall", "first_riser_swing_shortfall",
-                 "first_riser_body_shortfall", "next_tread_front_foot_shortfall", "next_tread_body_shortfall"):
+                 "first_riser_body_shortfall", "next_tread_front_foot_shortfall", "next_tread_body_shortfall",
+                 "high_stair_axis_alignment"):
         weight = getattr(cfg.reward.scales, name)
         if not math.isfinite(weight) or weight > 0:
             raise ValueError(f"Reward weight must be finite and nonpositive: {name}")

@@ -15,11 +15,13 @@ from agents.supermimic.interfaces import EnvStep, TaskState
 from ..config.env_cfgs import (
     resolve_go2_supermimic_cfg, unitree_go2_flat_env_cfg, unitree_go2_rough_env_cfg,
 )
+from ..mdp.commands import heading_command
 from ..mdp.curriculums import CommandCurriculum, TerrainCurriculum
 from ..mdp.state_spec import (
     ACTION_DIM, COMMAND_TIMER, CONTEXT_DIM, CONTEXT_ENCODER_BIAS, CONTEXT_FRICTION,
     CONTEXT_ORIGIN, CONTEXT_RANGES, CONTEXT_ZERO_PROBABILITY, JOINT_NAMES,
-    COMMAND_MODE, COMMAND_OVERRIDE, ELAPSED_TIME, FIXED_STRAIGHT_MODE, HEADING_TARGET, STANDING,
+    COMMAND_MODE, COMMAND_OVERRIDE, ELAPSED_TIME, FIXED_STRAIGHT_MODE, HEADING_TARGET,
+    HIGH_STAIR_HEADING_MODE, STANDING,
 )
 from ..mdp.reference_task import Go2ReferenceTaskModel
 from ..mdp.reference_state import ANGULAR_BODY, CONTEXT_COM
@@ -170,6 +172,7 @@ class Go2TransitionAdapter:
 
     def _set_high_stair_commands(self, ids, state):
         chosen = self._high_stair_starts[ids]
+        cfg = self.cfg.commands
         speed_indices = torch.randint(self._high_stair_speeds.numel(), ids.shape, device=self.device)
         speed = self._high_stair_speeds[speed_indices]
         zeros = torch.zeros_like(speed)
@@ -177,10 +180,16 @@ class Go2TransitionAdapter:
         state.command.copy_(torch.where(chosen[:, None], command, state.command))
         memory = state.memory
         memory[:, COMMAND_TIMER] = torch.where(
-            chosen, self.cfg.commands.high_stair_straight_seconds, memory[:, COMMAND_TIMER])
+            chosen, cfg.high_stair_straight_seconds, memory[:, COMMAND_TIMER])
         memory[:, STANDING] = torch.where(chosen, 0., memory[:, STANDING])
-        memory[:, HEADING_TARGET] = torch.where(chosen, self.robot.data.heading_w[ids], memory[:, HEADING_TARGET])
-        memory[:, COMMAND_MODE] = torch.where(chosen, FIXED_STRAIGHT_MODE, memory[:, COMMAND_MODE])
+        yaw = self.task.yaw(state)
+        target_yaw = 0. if cfg.high_stair_heading_feedback else yaw
+        mode = HIGH_STAIR_HEADING_MODE if cfg.high_stair_heading_feedback else FIXED_STRAIGHT_MODE
+        memory[:, HEADING_TARGET] = torch.where(chosen, target_yaw, memory[:, HEADING_TARGET])
+        memory[:, COMMAND_MODE] = torch.where(chosen, mode, memory[:, COMMAND_MODE])
+        if cfg.high_stair_heading_feedback:
+            state.command.copy_(heading_command(cfg, state.command, yaw, memory[:, HEADING_TARGET],
+                                               memory[:, STANDING], memory[:, COMMAND_MODE]))
 
     def _reset_rows(self, ids):
         self._set_origins(ids)

@@ -247,6 +247,7 @@ class Go2ReferenceCfg(BaseConfig):
         high_stair_straight_fraction = 0.0  # 固定 L4/L5 训练环境中采集正面入阶的回合比例。
         high_stair_straight_speeds = (0.50, 0.75, 1.00)  # 按回合等概率采样，米每秒。
         high_stair_straight_seconds = 5.0  # 入阶直行指令时长，之后恢复常规采样。
+        high_stair_heading_feedback = False  # 专项回合沿楼梯 +X 轴保持航向。
 
     class reward:
         """机体系平移及指定HIM奖励；各项先返回奖励率。"""
@@ -258,6 +259,7 @@ class Go2ReferenceCfg(BaseConfig):
         flat_forward_velocity_error_scale = 0.10  # 平地前向速度误差归一化尺度，米每秒。
         front_riser_clearance_margin = 0.008  # 跨上升立面时相对新踏面的足底余量，米。
         front_riser_prelift_s = 0.0  # 前足接近立面时提前评分的支撑末段时长，秒。
+        next_tread_body_corner_probes = False  # 在前壳和碰撞盒的左右角分别查询踏面。
         pose_tracking_gate = True  # 移动时以实际速度跟踪门控姿态奖励；站立保留原评分。
         fall_angle = math.radians(70)
         fall_softness_deg = 5.0
@@ -295,6 +297,7 @@ class Go2ReferenceCfg(BaseConfig):
             first_riser_body_shortfall = 0.0
             next_tread_front_foot_shortfall = 0.0
             next_tread_body_shortfall = 0.0
+            high_stair_axis_alignment = 0.0
             is_terminated = -100.0  # 失败终止奖励率；想象端使用软失败概率，正常超时不罚。
             action_rate_l2 = -0.1
             joint_pos_limits = -10.0
